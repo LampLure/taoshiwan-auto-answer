@@ -187,6 +187,18 @@ class QuestionDatabase:
         words2 = set(clean_text2.split())
         return self.calculate_similarity_fast(clean_text1, clean_text2, words1, words2)
     
+    def question_exists(self, content):
+        """检查题目是否已存在"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+            SELECT COUNT(*) FROM questions WHERE content = ?
+            ''', (content,))
+            
+            result = cursor.fetchone()
+            return result[0] > 0 if result else False
+    
     def get_all_questions(self):
         with self.get_connection() as conn:
             cursor = conn.cursor()

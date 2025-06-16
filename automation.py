@@ -3,7 +3,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QObject
 import time
 import hashlib
 from functools import lru_cache
@@ -12,11 +12,15 @@ try:
     import psutil
 except ImportError:
     psutil = None
-from config import WEBSITE_URL, XPATHS, TIMEOUTS, BROWSER_OPTIONS, SHOW_BROWSER_WINDOW, OPERATION_DELAY
+from config import WEBSITE_URL, XPATHS, TIMEOUTS, BROWSER_OPTIONS, OPERATION_DELAY
+import config
+import re
+from bs4 import BeautifulSoup
 
 class BrowserAutomation(QThread):
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(int, str)
+    progress_signal = pyqtSignal(int, str)  # 进度信号: (百分比, 描述)
     
     def __init__(self, accounts, question_db):
         super().__init__()
@@ -218,7 +222,7 @@ class BrowserAutomation(QThread):
             options.add_argument(option)
         
         # 根据配置决定是否显示浏览器窗口
-        if not SHOW_BROWSER_WINDOW:
+        if not config.SHOW_BROWSER_WINDOW:
             options.add_argument("--headless")  # 无头模式，不显示浏览器界面
             self.log_signal.emit("浏览器运行在无头模式")
         else:
@@ -227,18 +231,26 @@ class BrowserAutomation(QThread):
         self.driver = webdriver.Chrome(options=options)
         
         try:
-            while self.running and self.current_account_index < len(self.accounts):
+            total_accounts = len(self.accounts)
+            while self.running and self.current_account_index < total_accounts:
                 if self.paused:
                     self.wait_with_delay(1)  # 统一延迟控制，暂停状态等待
                     continue
                     
                 account = self.accounts[self.current_account_index]
+                # 计算总体进度
+                overall_progress = int((self.current_account_index / total_accounts) * 100)
+                self.progress_signal.emit(overall_progress, f"正在处理账号 {self.current_account_index + 1}/{total_accounts}: {account['username']}")
+                
                 self.log_signal.emit(f"处理账号: {account['username']}")
                 self.status_signal.emit(self.current_account_index, "处理中")
                 
                 try:
                     self.process_account(account)
                     self.status_signal.emit(self.current_account_index, "已完成")
+                    # 更新完成进度
+                    completed_progress = int(((self.current_account_index + 1) / total_accounts) * 100)
+                    self.progress_signal.emit(completed_progress, f"账号 {self.current_account_index + 1}/{total_accounts} 已完成: {account['username']}")
                 except KeyboardInterrupt:
                     self.log_signal.emit("自动化过程被用户中断")
                     self.status_signal.emit(self.current_account_index, "已中断")
@@ -298,7 +310,7 @@ class BrowserAutomation(QThread):
                             for option in BROWSER_OPTIONS:
                                 options.add_argument(option)
                             
-                            if not SHOW_BROWSER_WINDOW:
+                            if not config.SHOW_BROWSER_WINDOW:
                                 options.add_argument("--headless")
                             
                             # 添加额外的崩溃恢复选项
@@ -337,6 +349,9 @@ class BrowserAutomation(QThread):
                 self.current_account_index += 1
                 
             self.log_signal.emit("所有账号处理完毕")
+            # 发送完成信号
+            if self.running:
+                self.progress_signal.emit(100, f"所有账号处理完毕 ({total_accounts}/{total_accounts})")
         except KeyboardInterrupt:
             self.log_signal.emit("自动化过程被用户中断")
         except Exception as e:
@@ -361,6 +376,10 @@ class BrowserAutomation(QThread):
         self.clear_element_cache()
         self.skipped_homeworks.clear()  # 清空跳过作业记录
         self.log_signal.emit(f"开始处理账号: {account['username']}，已清空跳过作业记录")
+        
+        # 发送登录进度信号
+        current_progress = int((self.current_account_index / len(self.accounts)) * 100)
+        self.progress_signal.emit(current_progress, f"正在登录账号: {account['username']}")
         
         # 打开登录页面
         self.driver.get(WEBSITE_URL)
@@ -567,6 +586,9 @@ class BrowserAutomation(QThread):
                     if homework_id not in self.skipped_homeworks:
                         button = btn
                         button_index = i
+                        # 发送作业处理进度信号
+                        account_progress = int((self.current_account_index / len(self.accounts)) * 100)
+                        self.progress_signal.emit(account_progress, f"账号 {self.current_account_index + 1}/{len(self.accounts)}: 处理作业 {i+1}/{len(makeup_buttons)}")
                         self.log_signal.emit(f"选择第 {i+1} 个作业进行处理（作业ID: {homework_id}）")
                         break
                     else:
@@ -849,7 +871,7 @@ class BrowserAutomation(QThread):
                 # 等待提交完成，检查是否有成功或失败的提示
                 try:
                     # 等待提交结果
-                    WebDriverWait(self.driver, 10).until(
+                    WebDriverWait(self.driver, TIMEOUTS['element_wait'] * 3).until(
                         lambda driver: "提交试卷成功" in driver.page_source or "提交试卷失败" in driver.page_source
                     )
                     
@@ -1184,3 +1206,559 @@ class BrowserAutomation(QThread):
             
         except Exception as e:
             self.log_signal.emit(f"标注跳过作业时出错: {str(e)}")
+
+
+class QuestionBankImporter(QObject):
+    """题库导入器 - 从已完成账号导入题库"""
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, str)  # 进度信号: (百分比, 描述)
+    
+    def __init__(self, question_db, show_browser=True):
+        super().__init__()
+        self.question_db = question_db
+        self.driver = None
+        self.delay_multiplier = 1.0  # 延迟倍数，与主程序保持一致
+        self.show_browser = show_browser  # 是否显示浏览器窗口
+    
+    def wait_with_delay(self, base_delay=None, min_delay=None):
+        """统一的延迟控制方法"""
+        if base_delay is None:
+            base_delay = OPERATION_DELAY['default']
+        actual_delay = base_delay * self.delay_multiplier
+        
+        # 确保最小延迟时间，防止页面加载不完整
+        if min_delay is not None:
+            actual_delay = max(actual_delay, min_delay)
+        
+        time.sleep(actual_delay)
+    
+    def set_delay_multiplier(self, multiplier):
+        """设置延迟倍数"""
+        self.delay_multiplier = multiplier
+        
+    def import_from_completed_account(self, account, password):
+        """从已完成账号导入题库"""
+        try:
+            self.log_signal.emit(f"🚀 开始从账号 {account} 导入题库...")
+            self.progress_signal.emit(0, "正在初始化浏览器...")
+            
+            # 初始化浏览器
+            if not self._init_browser():
+                return {"success": False, "message": "浏览器初始化失败"}
+            
+            self.progress_signal.emit(20, "正在登录账号...")
+            # 登录账号
+            if not self._login(account, password):
+                return {"success": False, "message": "登录失败"}
+            
+            self.progress_signal.emit(40, "正在查找作业...")
+            # 直接开始导入作业题目（不需要额外导航到作业页面）
+            imported_count = self._import_all_homework_questions()
+            
+            self.progress_signal.emit(100, "题库导入完成")
+            self.log_signal.emit(f"✅ 题库导入完成！共导入 {imported_count} 个题目")
+            return {"success": True, "imported_count": imported_count}
+            
+        except Exception as e:
+            self.log_signal.emit(f"❌ 导入过程中发生错误: {str(e)}")
+            return {"success": False, "message": str(e)}
+        finally:
+            self._cleanup()
+    
+    def _init_browser(self):
+        """初始化浏览器"""
+        try:
+            # 使用与主程序相同的浏览器配置
+            options = webdriver.ChromeOptions()
+            for option in BROWSER_OPTIONS:
+                options.add_argument(option)
+            
+            # 根据实例配置决定是否显示浏览器窗口
+            if not self.show_browser:
+                options.add_argument("--headless")  # 无头模式，不显示浏览器界面
+                self.log_signal.emit("🌐 浏览器运行在无头模式")
+            else:
+                self.log_signal.emit("🌐 浏览器窗口将显示，便于调试")
+            
+            self.driver = webdriver.Chrome(options=options)
+            self.driver.set_page_load_timeout(30)
+            self.log_signal.emit("🌐 浏览器初始化成功")
+            return True
+            
+        except Exception as e:
+            self.log_signal.emit(f"❌ 浏览器初始化失败: {str(e)}")
+            return False
+    
+    def _login(self, account, password):
+        """登录账号 - 复用主程序的稳定登录逻辑"""
+        try:
+            self.log_signal.emit(f"🔐 正在登录账号: {account}")
+            
+            # 打开登录页面
+            self.driver.get(WEBSITE_URL)
+            
+            # 点击登录按钮打开登录框
+            login_button = WebDriverWait(self.driver, TIMEOUTS['element_wait'] * 3).until(
+                EC.element_to_be_clickable((By.XPATH, XPATHS["login_button"])))
+            login_button.click()
+            self.wait_with_delay()  # 统一延迟控制
+            
+            # 等待登录框出现
+            WebDriverWait(self.driver, 10).until(
+                EC.visibility_of_element_located((By.ID, XPATHS["login_modal"])))
+            
+            # 输入用户名和密码
+            username_input = WebDriverWait(self.driver, TIMEOUTS['element_wait'] * 3).until(
+                EC.presence_of_element_located((By.ID, XPATHS["username_input"])))
+            password_input = self.driver.find_element(By.ID, XPATHS["password_input"])
+            
+            username_input.clear()
+            username_input.send_keys(account)
+            self.wait_with_delay()  # 统一延迟控制
+            
+            password_input.clear()
+            password_input.send_keys(password)
+            self.wait_with_delay()  # 统一延迟控制
+            
+            # 使用JavaScript执行MD5加密并设置隐藏字段
+            self.driver.execute_script(f'''
+                document.getElementById("{XPATHS['pwd_hidden']}").value = hex_md5(document.getElementById("{XPATHS['password_input']}").value);
+            ''')
+            self.wait_with_delay()  # 统一延迟控制
+            
+            # 点击登录按钮 - 使用JavaScript执行login()函数
+            try:
+                self.driver.execute_script("login();")
+                self.log_signal.emit("已执行JavaScript登录函数")
+            except Exception as js_error:
+                self.log_signal.emit(f"JavaScript登录失败，尝试直接点击: {str(js_error)}")
+                # 备用方案：直接点击登录按钮
+                submit_button = self.driver.find_element(By.XPATH, XPATHS["submit_button"])
+                submit_button.click()
+            
+            self.wait_with_delay(3, min_delay=1.5)  # 统一延迟控制，等待登录处理，最少1.5秒
+            
+            # 检查登录是否成功
+            if self._check_login_success():
+                self.log_signal.emit("✅ 登录成功")
+                return True
+            else:
+                # 检查具体的登录错误
+                error_msg = self._check_login_error()
+                if error_msg:
+                    self.log_signal.emit(f"❌ 登录失败: {error_msg}")
+                else:
+                    self.log_signal.emit("❌ 登录失败: 未知原因")
+                return False
+                
+        except Exception as e:
+            self.log_signal.emit(f"❌ 登录过程中发生错误: {str(e)}")
+            return False
+    
+    def _check_login_error(self):
+        """检查登录错误信息 - 复用主程序的错误检查逻辑"""
+        try:
+            # 检查是否有弹窗错误信息
+            layers = self.driver.find_elements(By.CSS_SELECTOR, ".layui-layer-content")
+            for layer in layers:
+                try:
+                    # 检查弹窗是否可见
+                    if layer.is_displayed():
+                        layer_text = layer.text.strip()
+                        self.log_signal.emit(f"检测到弹窗内容: {layer_text}")
+                        
+                        # 检查常见的登录错误信息
+                        if any(error in layer_text for error in [
+                            "用户名或密码错误", "密码错误", "账号不存在", 
+                            "用户被置为无效", "请填写用户名", "请填写密码"
+                        ]):
+                            # 尝试关闭弹窗
+                            try:
+                                close_btn = layer.find_element(By.CSS_SELECTOR, ".layui-layer-close")
+                                if close_btn.is_displayed():
+                                    close_btn.click()
+                                    self.wait_with_delay(0.5)  # 统一延迟控制
+                            except:
+                                pass
+                            return layer_text
+                except:
+                    continue
+            
+            # 也检查页面源码中的错误信息（作为备用方法）
+            page_source = self.driver.page_source
+            if "用户名或密码错误" in page_source:
+                return "用户名或密码错误"
+            elif "密码错误" in page_source:
+                return "密码错误"
+            elif "账号不存在" in page_source:
+                return "账号不存在"
+            elif "用户被置为无效" in page_source:
+                return "用户被置为无效"
+                
+            return None
+            
+        except Exception as e:
+            self.log_signal.emit(f"检查登录错误时出现异常: {str(e)}")
+            return None
+    
+    def _check_login_success(self):
+        """检查登录是否成功"""
+        try:
+            # 检查URL是否包含登录成功的标识
+            current_url = self.driver.current_url
+            if 'myHomework.do' in current_url or 'index.do' in current_url:
+                return True
+            
+            # 检查页面是否包含登录后的元素
+            try:
+                self.driver.find_element(By.XPATH, "//a[contains(@href, 'logout')]")
+                return True
+            except:
+                pass
+            
+            return False
+            
+        except Exception:
+            return False
+    
+    def _navigate_to_homework(self):
+        """导航到作业页面"""
+        try:
+            self.log_signal.emit("📚 正在访问作业页面...")
+            
+            # 构建正确的学生作业页面URL
+            homework_url = WEBSITE_URL.replace('fore/index.do', 'stu/myHomework.do')
+            self.log_signal.emit(f"🔗 访问URL: {homework_url}")
+            self.driver.get(homework_url)
+            self.wait_with_delay(3, min_delay=2.0)  # 统一延迟控制，确保页面完全加载
+            
+            # 检查是否成功到达作业页面
+            current_url = self.driver.current_url
+            self.log_signal.emit(f"📍 当前URL: {current_url}")
+            
+            if 'myHomework.do' in current_url:
+                self.log_signal.emit("✅ 成功访问作业页面")
+                return True
+            else:
+                # 检查是否被重定向到登录页面
+                if 'login' in current_url.lower() or 'index.do' in current_url:
+                    self.log_signal.emit("⚠️ 可能需要重新登录或会话已过期")
+                else:
+                    self.log_signal.emit("❌ 无法访问作业页面")
+                return False
+                
+        except Exception as e:
+            self.log_signal.emit(f"❌ 访问作业页面时发生错误: {str(e)}")
+            return False
+    
+    def _import_all_homework_questions(self):
+        """导入所有作业的题目"""
+        import re  # 在方法开头导入re模块
+        imported_count = 0
+        
+        try:
+            # 检查当前是否在作业页面，如果不是则导航到作业页面
+            current_url = self.driver.current_url
+            if 'myHomework.do' not in current_url:
+                if not self._navigate_to_homework():
+                    self.log_signal.emit("❌ 无法访问作业页面")
+                    return 0
+            else:
+                self.log_signal.emit("✅ 已在作业页面")
+            
+            self.log_signal.emit("🔍 正在查找所有作业...")
+            
+            # 尝试多种方式查找"查看"按钮
+            view_buttons = []
+            
+            # 方式1: 标准的按钮查找
+            buttons1 = self.driver.find_elements(By.XPATH, "//button[contains(@class, 'btn') and contains(text(), '查看')]")
+            view_buttons.extend(buttons1)
+            
+            # 方式2: 更宽松的按钮查找（不限制class）
+            if not view_buttons:
+                buttons2 = self.driver.find_elements(By.XPATH, "//button[contains(text(), '查看')]")
+                view_buttons.extend(buttons2)
+            
+            # 方式3: 查找链接形式的"查看"
+            if not view_buttons:
+                links = self.driver.find_elements(By.XPATH, "//a[contains(text(), '查看')]")
+                view_buttons.extend(links)
+            
+            # 方式4: 查找包含"查看"的任何可点击元素
+            if not view_buttons:
+                clickables = self.driver.find_elements(By.XPATH, "//*[contains(text(), '查看') and (@onclick or @href)]")
+                view_buttons.extend(clickables)
+            
+            # 调试信息：输出页面源码片段
+            if not view_buttons:
+                self.log_signal.emit("🔍 未找到查看按钮，正在分析页面结构...")
+                page_source = self.driver.page_source
+                # 查找包含"查看"的HTML片段
+                view_matches = re.findall(r'.{0,100}查看.{0,100}', page_source, re.IGNORECASE)
+                if view_matches:
+                    self.log_signal.emit(f"📄 页面中包含'查看'的HTML片段数量: {len(view_matches)}")
+                    for i, match in enumerate(view_matches[:3]):  # 只显示前3个
+                        self.log_signal.emit(f"📄 片段{i+1}: {match.strip()}")
+                else:
+                    self.log_signal.emit("📄 页面中未找到包含'查看'的内容")
+                
+                # 查找所有按钮和链接
+                all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                all_links = self.driver.find_elements(By.TAG_NAME, "a")
+                self.log_signal.emit(f"📊 页面统计: {len(all_buttons)}个按钮, {len(all_links)}个链接")
+                
+                self.log_signal.emit("⚠️ 未找到任何作业")
+                return 0
+            
+            self.log_signal.emit(f"📋 找到 {len(view_buttons)} 个作业")
+            
+            # 先提取所有作业ID，避免stale element reference错误
+            homework_ids = []
+            for i, button in enumerate(view_buttons):
+                try:
+                    onclick_attr = button.get_attribute('onclick')
+                    if onclick_attr and 'view(' in onclick_attr:
+                        match = re.search(r"view\('([^']+)'\)", onclick_attr)
+                        if match:
+                            homework_id = match.group(1)
+                            homework_ids.append(homework_id)
+                        else:
+                            self.log_signal.emit(f"⚠️ 第 {i+1} 个作业ID提取失败")
+                    else:
+                        self.log_signal.emit(f"⚠️ 第 {i+1} 个作业onclick属性异常")
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ 提取第 {i+1} 个作业ID时发生错误: {str(e)}")
+                    continue
+            
+            self.log_signal.emit(f"📝 成功提取 {len(homework_ids)} 个作业ID")
+            
+            # 遍历处理每个作业ID
+            for i, homework_id in enumerate(homework_ids):
+                try:
+                    # 计算当前进度 (40% 到 95% 之间)
+                    progress = 40 + int((i / len(homework_ids)) * 55)
+                    self.progress_signal.emit(progress, f"正在处理作业 {i+1}/{len(homework_ids)}")
+                    self.log_signal.emit(f"📖 正在处理第 {i+1}/{len(homework_ids)} 个作业 (ID: {homework_id})...")
+                    
+                    # 导入该作业的题目
+                    count = self._import_homework_questions(homework_id)
+                    imported_count += count
+                    
+                    self.log_signal.emit(f"✅ 第 {i+1} 个作业导入完成，导入 {count} 个题目")
+                    
+                except Exception as e:
+                    self.log_signal.emit(f"❌ 处理第 {i+1} 个作业时发生错误: {str(e)}")
+                    continue
+            
+            return imported_count
+            
+        except Exception as e:
+            self.log_signal.emit(f"❌ 导入作业题目时发生错误: {str(e)}")
+            return imported_count
+    
+    def _import_homework_questions(self, homework_id):
+        """导入单个作业的题目"""
+        try:
+            # 构造查看作业的URL - 使用kcid参数而不是rsid
+            base_url = "https://infotech.51taoshi.com/hw/stu/viewHomework.do"
+            view_url = f"{base_url}?kcid={homework_id}"
+            self.log_signal.emit(f"📍 正在访问作业页面: {view_url}")
+            self.driver.get(view_url)
+            self.wait_with_delay(2, min_delay=1.0)  # 统一延迟控制，确保页面加载
+            
+            # 查找"查看作业"按钮并点击
+            view_homework_btn = None
+            
+            # 尝试多种方式查找"查看作业"按钮
+            search_strategies = [
+                ("//a[contains(text(), '查看作业')]", "链接形式的查看作业按钮"),
+                ("//button[contains(text(), '查看作业')]", "按钮形式的查看作业按钮"),
+                ("//input[@type='button' and contains(@value, '查看作业')]", "输入按钮形式的查看作业"),
+                ("//a[contains(@onclick, 'viewHomework') or contains(@href, 'viewHomework')]", "包含viewHomework的链接"),
+                ("//button[contains(@onclick, 'viewHomework')]", "包含viewHomework的按钮"),
+                ("//a[contains(text(), '查看')]", "包含查看的链接"),
+                ("//button[contains(text(), '查看')]", "包含查看的按钮")
+            ]
+            
+            for xpath, description in search_strategies:
+                try:
+                    view_homework_btn = WebDriverWait(self.driver, TIMEOUTS['element_wait']).until(
+                        EC.element_to_be_clickable((By.XPATH, xpath))
+                    )
+                    self.log_signal.emit(f"✅ 找到{description}")
+                    break
+                except:
+                    continue
+            
+            if view_homework_btn:
+                try:
+                    view_homework_btn.click()
+                    self.log_signal.emit("✅ 成功点击查看作业按钮")
+                    self.wait_with_delay(3, min_delay=2.0)  # 统一延迟控制，确保页面跳转完成
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ 点击查看作业按钮失败: {str(e)}")
+            else:
+                self.log_signal.emit("⚠️ 未找到任何形式的'查看作业'按钮")
+                # 添加页面调试信息
+                page_source = self.driver.page_source
+                if '查看' in page_source:
+                    import re
+                    view_matches = re.findall(r'.{0,50}查看.{0,50}', page_source, re.IGNORECASE)
+                    self.log_signal.emit(f"📄 页面中包含'查看'的内容片段数量: {len(view_matches)}")
+                    for i, match in enumerate(view_matches[:3]):
+                        self.log_signal.emit(f"📄 片段{i+1}: {match.strip()}")
+                else:
+                    self.log_signal.emit("📄 页面中未找到包含'查看'的内容")
+                
+                # 检查是否已经在题目页面
+                if any(keyword in page_source for keyword in ['题目', '答案', 'timu', 'answer']):
+                    self.log_signal.emit("💡 页面可能已经显示题目内容，直接解析")
+                else:
+                    self.log_signal.emit("❌ 页面既没有查看按钮也没有题目内容")
+            
+            # 解析页面中的题目和答案
+            return self._parse_questions_from_page()
+            
+        except Exception as e:
+            self.log_signal.emit(f"❌ 导入作业 {homework_id} 时发生错误: {str(e)}")
+            return 0
+    
+    def _parse_questions_from_page(self):
+        """从页面解析题目和答案"""
+        imported_count = 0
+        
+        try:
+            # 获取页面源码
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # 查找所有题目容器
+            question_containers = soup.find_all('li')
+            
+            for container in question_containers:
+                try:
+                    # 查找题目内容
+                    timu_div = container.find('div', class_='timu')
+                    if not timu_div:
+                        continue
+                    
+                    # 提取题目文本
+                    question_text = self._extract_question_text(timu_div)
+                    if not question_text:
+                        continue
+                    
+                    # 查找答案信息
+                    info_div = container.find('div', class_='info')
+                    if not info_div:
+                        continue
+                    
+                    # 提取正确答案
+                    correct_answer = self._extract_correct_answer(info_div)
+                    if not correct_answer:
+                        continue
+                    
+                    # 确定题目类型
+                    question_type = self._determine_question_type(timu_div)
+                    
+                    # 保存到数据库
+                    if self._save_question_to_db(question_text, correct_answer, question_type):
+                        imported_count += 1
+                        
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ 解析单个题目时发生错误: {str(e)}")
+                    continue
+            
+            return imported_count
+            
+        except Exception as e:
+            self.log_signal.emit(f"❌ 解析页面题目时发生错误: {str(e)}")
+            return 0
+    
+    def _extract_question_text(self, timu_div):
+        """提取题目文本"""
+        try:
+            # 获取题目的主要文本，去除题号和分数
+            question_text = timu_div.get_text(strip=True)
+            
+            # 去除题号（如"1.(30分)"）
+            question_text = re.sub(r'^\d+\.\(\d+分\)', '', question_text)
+            
+            # 去除选择题的选项部分
+            lines = question_text.split('\n')
+            question_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                # 如果遇到选项（A. B. C. D.），停止添加
+                if re.match(r'^[A-Z]\.|^[A-Z]、', line):
+                    break
+                if line:
+                    question_lines.append(line)
+            
+            return '\n'.join(question_lines).strip()
+            
+        except Exception:
+            return None
+    
+    def _extract_correct_answer(self, info_div):
+        """提取正确答案"""
+        try:
+            # 查找正确答案
+            answer_spans = info_div.find_all('span')
+            
+            for i, span in enumerate(answer_spans):
+                if '【正确答案：】' in span.get_text():
+                    # 正确答案在下一个span中
+                    if i + 1 < len(answer_spans):
+                        answer_text = answer_spans[i + 1].get_text().strip()
+                        # 去除可能的"分"字
+                        answer_text = re.sub(r'分$', '', answer_text)
+                        return answer_text
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    def _determine_question_type(self, timu_div):
+        """确定题目类型"""
+        try:
+            # 查找选择列表
+            choose_list = timu_div.find('ul', class_='choose-list')
+            
+            if choose_list:
+                # 有选择列表，是选择题
+                options = choose_list.find_all('li')
+                if len(options) > 0:
+                    return 'choice'
+            
+            # 默认为主观题
+            return 'subjective'
+            
+        except Exception:
+            return 'subjective'
+    
+    def _save_question_to_db(self, question_text, correct_answer, question_type):
+        """保存题目到数据库"""
+        try:
+            # 检查题目是否已存在
+            if self.question_db.question_exists(question_text):
+                return False
+            
+            # 添加题目到数据库
+            self.question_db.add_question(question_text, correct_answer, question_type)
+            return True
+            
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 保存题目到数据库时发生错误: {str(e)}")
+            return False
+    
+    def _cleanup(self):
+        """清理资源"""
+        try:
+            if self.driver:
+                self.driver.quit()
+                self.log_signal.emit("🧹 浏览器资源已清理")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 清理资源时发生错误: {str(e)}")

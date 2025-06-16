@@ -1,8 +1,8 @@
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
-                             QWidget, QPushButton, QLineEdit, QTextEdit, QLabel, 
-                             QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-                             QCheckBox, QMessageBox, QSplitter, QFrame, QSlider)
-from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QLineEdit, QPushButton, QTextEdit, QTableWidget, 
+                             QTableWidgetItem, QHeaderView, QTabWidget, QGroupBox, 
+                             QCheckBox, QMessageBox, QSplitter, QFrame, QSlider, QProgressBar)
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QFont
 import time
 from config import DEFAULT_PASSWORD, UI_CONFIG, OPERATION_DELAY
@@ -18,6 +18,7 @@ class AutoAnswerApp(QMainWindow):
         self.current_account_index = 0
         self.question_db = question_db
         self.browser_automation = None
+        self.delay_multiplier = 1.0  # 延迟倍数，与延迟滑块同步
         self.initUI()
         
     def initUI(self):
@@ -126,7 +127,7 @@ class AutoAnswerApp(QMainWindow):
         
         # 创建隐藏的复选框以保持代码兼容性
         self.show_browser_checkbox = QCheckBox()
-        self.show_browser_checkbox.setChecked(False)  # 默认不显示浏览器
+        self.show_browser_checkbox.setChecked(True)  # 默认显示浏览器
         self.show_browser_checkbox.setVisible(False)  # 隐藏控件
         
         # 操作延迟控制
@@ -209,26 +210,42 @@ class AutoAnswerApp(QMainWindow):
         
         # 题目文本输入区域
         self.question_text = QTextEdit()
+        self.question_text.setAcceptRichText(False)  # 只接受纯文本
         self.question_text.setPlaceholderText("请粘贴题目文本，支持两种格式：\n\n格式1（选择题）：\n1.(30分)题目内容\nA.选项A\nB.选项B\n...\n【正确答案：】X分\n\n格式2（简单主观题）：\n1.(40分)题目内容\n答案内容")
         import_layout.addWidget(self.question_text)
         
         # 导入按钮区域
         import_buttons_widget = QWidget()
-        import_buttons_layout = QHBoxLayout(import_buttons_widget)
+        import_buttons_layout = QVBoxLayout(import_buttons_widget)
         import_buttons_layout.setContentsMargins(0, 0, 0, 0)
         import_buttons_layout.setSpacing(3)
+        
+        # 第一行按钮
+        first_row_widget = QWidget()
+        first_row_layout = QHBoxLayout(first_row_widget)
+        first_row_layout.setContentsMargins(0, 0, 0, 0)
+        first_row_layout.setSpacing(3)
         
         # 智能导入按钮（自动识别格式）
         smart_import_btn = QPushButton("智能导入（自动识别）")
         smart_import_btn.clicked.connect(self.import_questions)
         smart_import_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
-        import_buttons_layout.addWidget(smart_import_btn)
+        first_row_layout.addWidget(smart_import_btn)
         
         # 简单主观题专用导入按钮
         subjective_import_btn = QPushButton("简单主观题导入")
         subjective_import_btn.clicked.connect(self.import_simple_subjective_questions)
         subjective_import_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
-        import_buttons_layout.addWidget(subjective_import_btn)
+        first_row_layout.addWidget(subjective_import_btn)
+        
+        import_buttons_layout.addWidget(first_row_widget)
+        
+        # 第二行按钮 - 从已完成账号导入题库
+        import_from_account_btn = QPushButton("从已完成账号导入题库")
+        import_from_account_btn.clicked.connect(self.import_from_completed_account)
+        import_from_account_btn.setStyleSheet("QPushButton { background-color: #FF9800; color: white; font-weight: bold; }")
+        import_from_account_btn.setToolTip("登录其他已完成作业的账号，自动提取题库")
+        import_buttons_layout.addWidget(import_from_account_btn)
         
         import_layout.addWidget(import_buttons_widget)
         
@@ -245,10 +262,11 @@ class AutoAnswerApp(QMainWindow):
         view_layout.addWidget(view_label)
         
         # 题库列表
-        self.questions_table = QTableWidget(0, 4)
-        self.questions_table.setHorizontalHeaderLabels(["ID", "题目内容", "答案", "类型"])
+        self.questions_table = QTableWidget(0, 3)
+        self.questions_table.setHorizontalHeaderLabels(["题目内容", "答案", "类型"])
         self.questions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.questions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.questions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        # 隐藏ID列（不再显示）
         view_layout.addWidget(self.questions_table)
         
         # 刷新和删除按钮
@@ -312,6 +330,50 @@ class AutoAnswerApp(QMainWindow):
         # 添加日志区域到主布局
         main_layout.addWidget(log_group)
         
+        # 创建整体布局（包含主布局和进度条）
+        overall_layout = QVBoxLayout()
+        overall_layout.setContentsMargins(0, 0, 0, 0)
+        overall_layout.setSpacing(0)
+        
+        # 创建主内容区域
+        main_content = QWidget()
+        main_content.setLayout(main_layout)
+        overall_layout.addWidget(main_content)
+        
+        # 创建底部进度条
+        self.status_bar = QProgressBar()
+        self.status_bar.setFixedHeight(25)
+        self.status_bar.setTextVisible(True)
+        self.status_bar.setFormat("就绪")
+        self.status_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                text-align: center;
+                font-family: 'Microsoft YaHei';
+                font-size: 12px;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 2px;
+            }
+        """)
+        overall_layout.addWidget(self.status_bar)
+        
+        # 设置整体布局到中央窗口
+        central_widget.setLayout(overall_layout)
+        
+        # 初始化进度条状态
+        self.error_flash_timer = None
+        self.flash_count = 0
+        
+        # 进度条动画相关属性
+        self.progress_animation_timer = QTimer()
+        self.progress_animation_timer.timeout.connect(self.animate_progress)
+        self.target_progress = 0
+        self.current_progress = 0
+        self.progress_step = 1
+        
         # 初始化题库
         self.refresh_questions()
         
@@ -320,13 +382,99 @@ class AutoAnswerApp(QMainWindow):
         
         # 启动时清理日志文件
         self.clean_log_files(silent=True)
+    
+    def update_status_bar(self, message, progress=None, is_error=False):
+        """更新状态栏信息"""
+        self.status_bar.setFormat(message)
+        if progress is not None:
+            # 使用动画更新进度
+            self.target_progress = progress
+            if not self.progress_animation_timer.isActive():
+                self.progress_animation_timer.start(20)
+        
+        if is_error:
+            self.start_error_flash()
+        else:
+            self.stop_error_flash()
+    
+    def start_error_flash(self):
+        """开始错误闪烁效果"""
+        if self.error_flash_timer:
+            self.error_flash_timer.stop()
+        
+        self.error_flash_timer = QTimer()
+        self.error_flash_timer.timeout.connect(self.flash_error)
+        self.flash_count = 0
+        self.error_flash_timer.start(300)  # 每300ms闪烁一次
+    
+    def stop_error_flash(self):
+        """停止错误闪烁效果"""
+        if self.error_flash_timer:
+            self.error_flash_timer.stop()
+            self.error_flash_timer = None
+        
+        # 恢复正常样式
+        self.status_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                text-align: center;
+                font-family: 'Microsoft YaHei';
+                font-size: 12px;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 2px;
+            }
+        """)
+    
+    def flash_error(self):
+        """错误闪烁效果"""
+        self.flash_count += 1
+        
+        if self.flash_count % 2 == 0:
+            # 红色
+            self.status_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #ccc;
+                    border-radius: 3px;
+                    text-align: center;
+                    font-family: 'Microsoft YaHei';
+                    font-size: 12px;
+                    background-color: #ffebee;
+                }
+                QProgressBar::chunk {
+                    background-color: #f44336;
+                    border-radius: 2px;
+                }
+            """)
+        else:
+            # 白色
+            self.status_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #ccc;
+                    border-radius: 3px;
+                    text-align: center;
+                    font-family: 'Microsoft YaHei';
+                    font-size: 12px;
+                    background-color: white;
+                }
+                QProgressBar::chunk {
+                    background-color: #ddd;
+                    border-radius: 2px;
+                }
+            """)
+        
+        # 闪烁10次后停止
+        if self.flash_count >= 20:
+            self.stop_error_flash()
         
     def add_account(self):
         account = self.account_edit.text().strip()
         password = self.password_edit.text().strip()
         
         if not account:
-            QMessageBox.warning(self, "警告", "请输入账号！")
+            self.update_status_bar("请输入账号！", is_error=True)
             return
         
         # 检查是否包含换行符（多个账号）
@@ -343,13 +491,13 @@ class AutoAnswerApp(QMainWindow):
             
         # 验证账号格式（只包含数字）
         if not account.isdigit():
-            QMessageBox.warning(self, "警告", f"账号格式无效: {account}\n账号只能包含数字！")
+            self.update_status_bar(f"账号格式无效: {account} (账号只能包含数字)", is_error=True)
             return
             
         # 检查是否已存在
         for existing_account in self.accounts:
             if existing_account["username"] == account:
-                QMessageBox.warning(self, "警告", f"账号已存在: {account}")
+                self.update_status_bar(f"账号已存在: {account}", is_error=True)
                 return
             
         # 添加到账号列表
@@ -434,7 +582,7 @@ class AutoAnswerApp(QMainWindow):
     def delete_account(self):
         selected_rows = self.accounts_table.selectionModel().selectedRows()
         if not selected_rows:
-            QMessageBox.warning(self, "警告", "请先选择要删除的账号！")
+            self.update_status_bar("请先选择要删除的账号！", is_error=True)
             return
             
         for row in sorted(selected_rows, reverse=True):
@@ -446,12 +594,12 @@ class AutoAnswerApp(QMainWindow):
     
     def start_automation(self):
         if not self.accounts:
-            QMessageBox.warning(self, "警告", "请先添加账号！")
+            self.update_status_bar("请先添加账号！", is_error=True)
             return
             
         # 检查是否已有自动化进程在运行
         if self.browser_automation and self.browser_automation.isRunning():
-            QMessageBox.warning(self, "警告", "自动化进程已在运行中！")
+            self.update_status_bar("自动化进程已在运行中！", is_error=True)
             return
             
         # 根据用户选择更新浏览器显示配置
@@ -467,6 +615,7 @@ class AutoAnswerApp(QMainWindow):
         self.browser_automation = BrowserAutomation(self.accounts, self.question_db)
         self.browser_automation.log_signal.connect(self.log)
         self.browser_automation.status_signal.connect(self.update_account_status)
+        self.browser_automation.progress_signal.connect(self.update_progress)
         self.browser_automation.finished.connect(self.on_automation_finished)
         
         # 设置当前的延迟时间
@@ -481,6 +630,7 @@ class AutoAnswerApp(QMainWindow):
         self.pause_btn.setText("暂停")
         
         self.log("开始自动答题...")
+        self.update_status_bar(f"自动答题已启动 - 共{len(self.accounts)}个账号", progress=0)
         if config.SHOW_BROWSER_WINDOW:
             self.log("请关注外部Chrome浏览器窗口查看自动化进度")
         else:
@@ -488,7 +638,7 @@ class AutoAnswerApp(QMainWindow):
     
     def pause_automation(self):
         if not self.browser_automation or not self.browser_automation.isRunning():
-            QMessageBox.warning(self, "警告", "没有正在运行的自动化进程！")
+            self.update_status_bar("没有正在运行的自动化进程！", is_error=True)
             return
             
         if self.browser_automation.paused:
@@ -496,15 +646,17 @@ class AutoAnswerApp(QMainWindow):
             self.browser_automation.resume()
             self.pause_btn.setText("暂停")
             self.log("已恢复自动答题")
+            self.update_status_bar("自动答题已恢复")
         else:
             # 暂停自动化
             self.browser_automation.pause()
             self.pause_btn.setText("恢复")
             self.log("已暂停自动答题")
+            self.update_status_bar("自动答题已暂停")
     
     def stop_automation(self):
         if not self.browser_automation or not self.browser_automation.isRunning():
-            QMessageBox.warning(self, "警告", "没有正在运行的自动化进程！")
+            self.update_status_bar("没有正在运行的自动化进程！", is_error=True)
             return
             
         # 确认停止
@@ -515,6 +667,7 @@ class AutoAnswerApp(QMainWindow):
         if reply == QMessageBox.Yes:
             self.browser_automation.stop()
             self.log("正在停止自动答题...")
+            self.update_status_bar("正在停止自动答题...")
     
     def on_automation_finished(self):
         """自动化完成后的回调函数"""
@@ -523,16 +676,50 @@ class AutoAnswerApp(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.pause_btn.setText("暂停")
         self.log("自动化进程已结束")
+        self.update_status_bar("自动化进程已结束", progress=100)
     
     def update_account_status(self, account_index, status):
         if 0 <= account_index < self.accounts_table.rowCount():
             self.accounts_table.setItem(account_index, 2, QTableWidgetItem(status))
             self.accounts[account_index]["status"] = status
     
+    def update_progress(self, progress, description):
+        """更新进度条和状态描述"""
+        # 更新状态描述
+        self.status_bar.setFormat(description)
+        
+        # 启动平滑动画到目标进度
+        self.target_progress = progress
+        if not self.progress_animation_timer.isActive():
+            self.progress_animation_timer.start(20)  # 每20ms更新一次，实现平滑动画
+    
+    def animate_progress(self):
+        """进度条动画方法"""
+        if self.current_progress < self.target_progress:
+            # 计算动画步长，距离越远步长越大
+            distance = self.target_progress - self.current_progress
+            self.progress_step = max(1, distance // 10)  # 至少1，最多距离的1/10
+            self.current_progress = min(self.current_progress + self.progress_step, self.target_progress)
+        elif self.current_progress > self.target_progress:
+            # 向下动画（虽然不常见）
+            distance = self.current_progress - self.target_progress
+            self.progress_step = max(1, distance // 10)
+            self.current_progress = max(self.current_progress - self.progress_step, self.target_progress)
+        
+        # 更新进度条显示
+        self.status_bar.setValue(self.current_progress)
+        
+        # 如果到达目标进度，停止动画
+        if self.current_progress == self.target_progress:
+            self.progress_animation_timer.stop()
+    
     def on_delay_changed(self, value):
         """处理延迟滑块值变化"""
         delay_seconds = value / 100.0  # 转换回秒数
         self.delay_value_label.setText(f"当前延迟: {delay_seconds:.2f}秒")
+        
+        # 更新延迟倍数（基于默认延迟的倍数）
+        self.delay_multiplier = delay_seconds / OPERATION_DELAY['default']
         
         # 如果自动化正在运行，更新其延迟设置
         if hasattr(self, 'browser_automation') and self.browser_automation:
@@ -577,7 +764,7 @@ class AutoAnswerApp(QMainWindow):
         # 获取文本内容
         text = self.question_text.toPlainText().strip()
         if not text:
-            QMessageBox.warning(self, "警告", "请先输入题目文本！")
+            self.update_status_bar("请先输入题目文本！", is_error=True)
             return
             
         # 创建导入器并导入题目
@@ -585,27 +772,27 @@ class AutoAnswerApp(QMainWindow):
         try:
             result = importer.import_from_text(text)
             if result["success"]:
-                QMessageBox.information(self, "导入成功", f"成功导入{result['imported_count']}个题目！")
+                self.update_status_bar(f"成功导入{result['imported_count']}个题目！")
                 self.log(f"智能导入成功：{result['imported_count']}个题目")
                 # 清空文本框
                 self.question_text.clear()
                 # 刷新题库显示
                 self.refresh_questions()
             else:
-                QMessageBox.warning(self, "导入失败", result["message"])
+                self.update_status_bar(result["message"], is_error=True)
                 self.log(f"智能导入失败: {result['message']}")
         except KeyboardInterrupt:
             self.log("导入操作被用户中断")
-            QMessageBox.warning(self, "操作中断", "导入操作被用户中断")
+            self.update_status_bar("导入操作被用户中断", is_error=True)
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导入过程中发生错误: {str(e)}")
+            self.update_status_bar(f"导入过程中发生错误: {str(e)}", is_error=True)
             self.log(f"智能导入错误: {str(e)}")
     
     def import_simple_subjective_questions(self):
         # 获取文本内容
         text = self.question_text.toPlainText().strip()
         if not text:
-            QMessageBox.warning(self, "警告", "请先输入题目文本！")
+            self.update_status_bar("请先输入题目文本！", is_error=True)
             return
             
         # 创建导入器并使用简单主观题专用方法导入题目
@@ -613,21 +800,161 @@ class AutoAnswerApp(QMainWindow):
         try:
             result = importer.import_simple_subjective_from_text(text)
             if result["success"]:
-                QMessageBox.information(self, "导入成功", f"成功导入{result['imported_count']}个简单主观题！")
+                self.update_status_bar(f"成功导入{result['imported_count']}个简单主观题！")
                 self.log(f"简单主观题导入成功：{result['imported_count']}个题目")
                 # 清空文本框
                 self.question_text.clear()
                 # 刷新题库显示
                 self.refresh_questions()
             else:
-                QMessageBox.warning(self, "导入失败", result["message"])
+                self.update_status_bar(result["message"], is_error=True)
                 self.log(f"简单主观题导入失败: {result['message']}")
         except KeyboardInterrupt:
             self.log("导入操作被用户中断")
-            QMessageBox.warning(self, "操作中断", "导入操作被用户中断")
+            self.update_status_bar("导入操作被用户中断", is_error=True)
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导入过程中发生错误: {str(e)}")
+            self.update_status_bar(f"导入过程中发生错误: {str(e)}", is_error=True)
             self.log(f"简单主观题导入错误: {str(e)}")
+    
+    def import_from_completed_account(self):
+        """从已完成账号导入题库"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QProgressBar
+        
+        # 创建账号输入对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("从已完成账号导入题库")
+        dialog.setFixedSize(400, 200)
+        dialog.setModal(True)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 说明标签
+        info_label = QLabel("请输入已完成作业的账号信息，程序将自动登录并提取题库：")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # 账号输入
+        account_layout = QHBoxLayout()
+        account_layout.addWidget(QLabel("账号:"))
+        account_input = QLineEdit()
+        account_input.setPlaceholderText("输入账号")
+        account_layout.addWidget(account_input)
+        layout.addLayout(account_layout)
+        
+        # 密码输入
+        password_layout = QHBoxLayout()
+        password_layout.addWidget(QLabel("密码:"))
+        password_input = QLineEdit()
+        password_input.setEchoMode(QLineEdit.Password)
+        password_input.setPlaceholderText(f"留空使用默认密码({DEFAULT_PASSWORD})")
+        password_layout.addWidget(password_input)
+        layout.addLayout(password_layout)
+        
+        # 进度条
+        progress_bar = QProgressBar()
+        progress_bar.setVisible(False)
+        layout.addWidget(progress_bar)
+        
+        # 按钮
+        button_layout = QHBoxLayout()
+        start_btn = QPushButton("开始导入")
+        cancel_btn = QPushButton("取消")
+        button_layout.addWidget(start_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        # 按钮事件
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        def start_import():
+            account = account_input.text().strip()
+            password = password_input.text().strip() or DEFAULT_PASSWORD
+            
+            if not account:
+                self.update_status_bar("请输入账号！", is_error=True)
+                return
+            
+            # 禁用按钮，显示进度条
+            start_btn.setEnabled(False)
+            cancel_btn.setEnabled(False)
+            progress_bar.setVisible(True)
+            progress_bar.setRange(0, 100)  # 设置为百分比进度条
+            progress_bar.setValue(0)
+            progress_bar.setFormat("准备开始导入... (0%)")
+            
+            # 关闭弹窗
+            dialog.accept()
+            
+            # 在主界面显示进度
+            self.update_status_bar("正在从已完成账号导入题库...", progress=0)
+            
+            # 启动导入线程
+            self.start_question_import_thread(account, password)
+        
+        start_btn.clicked.connect(start_import)
+        
+        dialog.exec_()
+    
+    def start_question_import_thread(self, account, password):
+        """启动题库导入线程"""
+        from PyQt5.QtCore import QThread, pyqtSignal
+        
+        class QuestionImportThread(QThread):
+            log_signal = pyqtSignal(str)
+            finished_signal = pyqtSignal(bool, str, int)
+            progress_signal = pyqtSignal(int, str)  # 进度信号
+            
+            def __init__(self, account, password, question_db, delay_multiplier=1.0):
+                super().__init__()
+                self.account = account
+                self.password = password
+                self.question_db = question_db
+                self.delay_multiplier = delay_multiplier
+                self.running = True
+            
+            def run(self):
+                try:
+                    from automation import QuestionBankImporter
+                    # 创建导入器时显式设置显示浏览器窗口
+                    importer = QuestionBankImporter(self.question_db, show_browser=True)
+                    importer.log_signal.connect(self.log_signal.emit)
+                    importer.progress_signal.connect(self.progress_signal.emit)
+                    # 传递当前的延迟倍数设置
+                    importer.set_delay_multiplier(self.delay_multiplier)
+                    
+                    result = importer.import_from_completed_account(self.account, self.password)
+                    
+                    if result["success"]:
+                        self.finished_signal.emit(True, f"成功导入{result['imported_count']}个题目！", result['imported_count'])
+                    else:
+                        self.finished_signal.emit(False, result["message"], 0)
+                        
+                except Exception as e:
+                    self.finished_signal.emit(False, f"导入过程中发生错误: {str(e)}", 0)
+        
+        # 创建并启动线程
+        self.import_thread = QuestionImportThread(account, password, self.question_db, self.delay_multiplier)
+        
+        # 连接信号
+        self.import_thread.log_signal.connect(self.log)
+        
+        def on_import_progress(percentage, description):
+            # 更新主界面进度条
+            self.update_status_bar(description, progress=percentage)
+        
+        self.import_thread.progress_signal.connect(on_import_progress)
+        
+        def on_import_finished(success, message, count):
+            if success:
+                self.update_status_bar(f"题库导入成功！共导入 {count} 个题目", progress=100)
+                self.refresh_questions()  # 刷新题库显示
+                QMessageBox.information(self, "导入成功", message)
+            else:
+                self.update_status_bar(f"题库导入失败: {message}", is_error=True)
+                QMessageBox.warning(self, "导入失败", message)
+        
+        self.import_thread.finished_signal.connect(on_import_finished)
+        self.import_thread.start()
     
     def refresh_questions(self):
         # 获取所有题目
@@ -641,31 +968,31 @@ class AutoAnswerApp(QMainWindow):
             row_position = self.questions_table.rowCount()
             self.questions_table.insertRow(row_position)
             
-            # 设置ID
-            self.questions_table.setItem(row_position, 0, QTableWidgetItem(str(question[0])))
-            
             # 设置题目内容（截断过长的内容）
             question_content = question[1]
             if len(question_content) > 50:
                 question_content = question_content[:47] + "..."
-            self.questions_table.setItem(row_position, 1, QTableWidgetItem(question_content))
+            self.questions_table.setItem(row_position, 0, QTableWidgetItem(question_content))
             
             # 设置答案（截断过长的内容）
             answer_content = question[2]
             if len(answer_content) > 30:
                 answer_content = answer_content[:27] + "..."
-            self.questions_table.setItem(row_position, 2, QTableWidgetItem(answer_content))
+            self.questions_table.setItem(row_position, 1, QTableWidgetItem(answer_content))
             
             # 设置类型
             question_type = "选择题" if question[3] == "choice" else "主观题"
-            self.questions_table.setItem(row_position, 3, QTableWidgetItem(question_type))
+            self.questions_table.setItem(row_position, 2, QTableWidgetItem(question_type))
+            
+            # 存储原始ID用于删除操作
+            self.questions_table.item(row_position, 0).setData(Qt.UserRole, question[0])
         
         self.log(f"已刷新题库，共{len(questions)}个题目")
     
     def delete_question(self):
         selected_rows = self.questions_table.selectionModel().selectedRows()
         if not selected_rows:
-            QMessageBox.warning(self, "警告", "请先选择要删除的题目！")
+            self.update_status_bar("请先选择要删除的题目！", is_error=True)
             return
             
         # 确认删除
@@ -680,7 +1007,8 @@ class AutoAnswerApp(QMainWindow):
         deleted_count = 0
         for row in sorted(selected_rows, reverse=True):
             index = row.row()
-            question_id = int(self.questions_table.item(index, 0).text())
+            # 从UserRole数据中获取题目ID
+            question_id = self.questions_table.item(index, 0).data(Qt.UserRole)
             try:
                 self.question_db.delete_question(question_id)
                 deleted_count += 1
