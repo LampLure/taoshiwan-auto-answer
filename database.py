@@ -234,6 +234,10 @@ class QuestionDatabase:
             
             conn.commit()
     
+    def close(self):
+        """关闭数据库连接"""
+        self.close_connection()
+    
     def __del__(self):
         """析构函数，确保连接被正确关闭"""
         try:

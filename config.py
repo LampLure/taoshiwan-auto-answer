@@ -2,6 +2,7 @@
 
 import os
 import sys
+import shutil
 
 def get_resource_path(relative_path):
     """获取资源文件的绝对路径，兼容开发环境和打包后的环境"""
@@ -14,21 +15,58 @@ def get_resource_path(relative_path):
     
     return os.path.join(base_path, relative_path)
 
+def get_external_db_path():
+    """获取外部数据库文件路径（程序同级目录）"""
+    # 获取程序所在目录
+    if hasattr(sys, '_MEIPASS'):
+        # 打包环境：获取exe文件所在目录
+        exe_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发环境：使用当前目录
+        exe_dir = os.path.abspath(".")
+    
+    return os.path.join(exe_dir, "questions.db")
+
+def ensure_external_db():
+    """确保外部数据库文件存在，如果不存在则创建新的空题库文件"""
+    external_db_path = get_external_db_path()
+    
+    # 如果外部数据库文件不存在，创建新的题库文件
+    if not os.path.exists(external_db_path):
+        try:
+            # 导入数据库模块来创建新的题库文件
+            from database import QuestionDatabase
+            print(f"首次运行，正在创建题库文件: {external_db_path}")
+            
+            # 创建数据库实例，这会自动创建数据库文件和表结构
+            db = QuestionDatabase(external_db_path)
+            db.close()
+            
+            print(f"题库文件已创建: {external_db_path}")
+            print("提示: 您可以通过程序界面导入题目，或直接编辑此数据库文件")
+        except Exception as e:
+            print(f"创建题库文件时发生错误: {e}")
+            # 如果创建失败，回退到当前目录
+            external_db_path = "questions.db"
+    
+    return external_db_path
+
 # 网站URL
 WEBSITE_URL = "https://infotech.51taoshi.com/hw/fore/index.do"
 
 # 默认密码
 DEFAULT_PASSWORD = "123456"
 
-# 数据库文件路径
-DATABASE_PATH = get_resource_path("questions.db")
+# 数据库文件路径 - 优先使用外部文件
+DATABASE_PATH = ensure_external_db()
 
 # 浏览器配置
 # 浏览器显示设置
 SHOW_BROWSER_WINDOW = True  # 强制显示外部浏览器窗口，作为主要显示界面
 USE_EXTERNAL_BROWSER_AS_DISPLAY = True  # 使用外部浏览器作为主要显示界面
 
-BROWSER_OPTIONS = [
+# 基础浏览器选项
+BASE_BROWSER_OPTIONS = [
     # 禁用GPU加速，避免一些渲染问题
     "--disable-gpu",
     # 禁用沙盒模式，避免一些权限问题
@@ -47,24 +85,44 @@ BROWSER_OPTIONS = [
     "--disable-popup-blocking",
     # 启用自动化
     "--enable-automation",
-    # 增加稳定性配置
+    # 日志级别
+    "--log-level=3"
+]
+
+# CPU优化选项
+CPU_OPTIMIZED_OPTIONS = [
+    # CPU和内存优化
+    "--max_old_space_size=4096",
+    "--memory-pressure-off",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
+    
+    # 进程管理优化
+    "--process-per-site",
     "--disable-features=TranslateUI",
     "--disable-ipc-flooding-protection",
+    
+    # 网络优化
+    "--aggressive-cache-discard",
     "--disable-background-networking",
     "--disable-sync",
     "--disable-default-apps",
     "--disable-component-extensions-with-background-pages",
-    # 内存管理
-    "--memory-pressure-off",
-    "--max_old_space_size=4096",
+    
+    # 渲染优化
+    "--disable-gpu-sandbox",
+    "--disable-software-rasterizer",
+    "--enable-gpu-rasterization",
+    
     # 进程管理
     "--disable-web-security",
-    # 日志级别
-    "--log-level=3"
+    "--renderer-process-limit=8",
+    "--max-gum-fps=60"
 ]
+
+# 合并所有选项
+BROWSER_OPTIONS = BASE_BROWSER_OPTIONS + CPU_OPTIMIZED_OPTIONS
 
 # XPath选择器
 # XPath选择器

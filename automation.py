@@ -1,5 +1,6 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+import sys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
@@ -222,7 +223,15 @@ class BrowserAutomation(QThread):
             options.add_argument(option)
         
         # 根据配置决定是否显示浏览器窗口
-        if not config.SHOW_BROWSER_WINDOW:
+        # 打包环境下强制显示浏览器窗口
+        if hasattr(sys, '_MEIPASS'):
+            self.log_signal.emit("")
+            show_browser = True
+        else:
+            # 开发环境下使用配置文件设置
+            show_browser = config.SHOW_BROWSER_WINDOW
+        
+        if not show_browser:
             options.add_argument("--headless")  # 无头模式，不显示浏览器界面
             self.log_signal.emit("浏览器运行在无头模式")
         else:
@@ -310,7 +319,16 @@ class BrowserAutomation(QThread):
                             for option in BROWSER_OPTIONS:
                                 options.add_argument(option)
                             
-                            if not config.SHOW_BROWSER_WINDOW:
+                            # 打包环境下强制显示浏览器窗口
+                            if hasattr(sys, '_MEIPASS'):
+                                # 检测到打包环境，强制显示浏览器窗口
+                                self.log_signal.emit("重新初始化：检测到打包环境，强制显示浏览器窗口")
+                                show_browser = True
+                            else:
+                                # 开发环境下使用配置文件设置
+                                show_browser = config.SHOW_BROWSER_WINDOW
+                            
+                            if not show_browser:
                                 options.add_argument("--headless")
                             
                             # 添加额外的崩溃恢复选项

@@ -36,8 +36,6 @@ def main():
             "--onefile",  # 打包成单个exe文件
             "--windowed",  # 隐藏控制台窗口
             "--name=auto_answer",  # 使用英文文件名避免编码问题
-            "--add-data=questions.db;.",  # 包含数据库文件
-            "--add-data=config.py;.",  # 包含配置文件
             "--hidden-import=selenium",
             "--hidden-import=PyQt5",
             "--hidden-import=psutil",
@@ -65,16 +63,15 @@ def main():
             print(f"简化命令: {' '.join(simple_cmd)}")
             subprocess.check_call(simple_cmd)
             
-            # 手动复制数据文件
-            print("手动复制数据文件...")
+            # 手动复制exe文件
+            print("整理输出文件...")
             if os.path.exists('dist/auto_answer.exe'):
-                # 创建一个包含exe和数据文件的文件夹
+                # 创建一个包含exe的文件夹
                 output_dir = 'dist/auto_answer_package'
                 os.makedirs(output_dir, exist_ok=True)
                 shutil.copy('dist/auto_answer.exe', output_dir)
-                shutil.copy('questions.db', output_dir)
-                shutil.copy('config.py', output_dir)
                 print(f"打包完成！文件位置: {output_dir}/")
+                print("注意: 程序首次运行时会在exe同级目录自动创建题库文件")
             raise
         
         print("\n" + "="*50)
@@ -83,10 +80,12 @@ def main():
         print("文件大小约: 50-100MB")
         print("="*50)
         print("\n使用说明:")
-        print("1. 将dist文件夹中的'暴打淘师湾作业网.exe'发送给其他人")
+        print("1. 将dist文件夹中的'auto_answer.exe'发送给其他人")
         print("2. 双击exe文件即可运行")
-        print("3. 首次运行会自动下载Chrome驱动(需要网络)")
-        print("4. 确保目标电脑已安装Chrome浏览器")
+        print("3. 首次运行会自动创建题库文件(questions.db)到程序同级目录")
+        print("4. 首次运行会自动下载Chrome驱动(需要网络)")
+        print("5. 确保目标电脑已安装Chrome浏览器")
+        print("6. 可以直接编辑questions.db文件来管理题库")
         
     except subprocess.CalledProcessError as e:
         print(f"打包失败: {e}")

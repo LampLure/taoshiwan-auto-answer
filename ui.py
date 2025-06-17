@@ -1,13 +1,15 @@
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QTabWidget, QGroupBox, 
-                             QCheckBox, QMessageBox, QSplitter, QFrame, QSlider, QProgressBar)
+                             QCheckBox, QMessageBox, QSplitter, QFrame, QSlider, QProgressBar, QSpinBox)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QFont
 import time
 from config import DEFAULT_PASSWORD, UI_CONFIG, OPERATION_DELAY
 from automation import BrowserAutomation
 from question_importer import QuestionImporter
+from multi_thread_manager import MultiThreadManager
+from system_monitor import ResourceWidget
 
 class AutoAnswerApp(QMainWindow):
     def __init__(self, question_db):
@@ -19,7 +21,10 @@ class AutoAnswerApp(QMainWindow):
         self.question_db = question_db
         self.browser_automation = None
         self.delay_multiplier = 1.0  # 延迟倍数，与延迟滑块同步
+        self.multi_thread_manager = MultiThreadManager(question_db)  # 多线程管理器
+        self.is_multithread_mode = False  # 是否启用多线程模式
         self.initUI()
+        self.setup_multithread_signals()  # 设置多线程信号连接
         
     def initUI(self):
         # 设置全局字体为圆滑字体
@@ -130,53 +135,13 @@ class AutoAnswerApp(QMainWindow):
         self.show_browser_checkbox.setChecked(True)  # 默认显示浏览器
         self.show_browser_checkbox.setVisible(False)  # 隐藏控件
         
-        # 操作延迟控制
-        delay_group = QWidget()
-        delay_layout = QVBoxLayout(delay_group)
-        delay_layout.setContentsMargins(0, 0, 0, 0)
-        delay_layout.setSpacing(2)
-        
-        delay_label = QLabel("操作延迟控制(过低的延迟会导致程序卡顿)")
-        delay_label.setStyleSheet("font-weight: bold; font-size: 12px; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
-        delay_layout.addWidget(delay_label)
-        
-        # 延迟值显示标签
-        self.delay_value_label = QLabel(f"当前延迟: {OPERATION_DELAY['default']:.2f}秒")
-        self.delay_value_label.setStyleSheet("font-size: 11px; color: #666; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
-        delay_layout.addWidget(self.delay_value_label)
-        
-        # 延迟滑块
-        self.delay_slider = QSlider(Qt.Horizontal)
-        self.delay_slider.setMinimum(int(OPERATION_DELAY['min'] * 100))  # 转换为整数，精度0.01秒
-        self.delay_slider.setMaximum(int(OPERATION_DELAY['max'] * 100))
-        self.delay_slider.setValue(int(OPERATION_DELAY['default'] * 100))
-        self.delay_slider.setToolTip(f"调整操作间延迟时间 ({OPERATION_DELAY['min']}s - {OPERATION_DELAY['max']}s)")
-        self.delay_slider.valueChanged.connect(self.on_delay_changed)
-        delay_layout.addWidget(self.delay_slider)
-        
-        # 延迟范围标签
-        range_widget = QWidget()
-        range_layout = QHBoxLayout(range_widget)
-        range_layout.setContentsMargins(0, 0, 0, 0)
-        range_layout.setSpacing(0)
-        
-        min_label = QLabel(f"{OPERATION_DELAY['min']}s")
-        min_label.setStyleSheet("font-size: 10px; color: #888; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
-        max_label = QLabel(f"{OPERATION_DELAY['max']}s")
-        max_label.setStyleSheet("font-size: 10px; color: #888; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
-        
-        range_layout.addWidget(min_label)
-        range_layout.addStretch()
-        range_layout.addWidget(max_label)
-        
-        delay_layout.addWidget(range_widget)
-        operations_layout.addWidget(delay_group)
+        # 延迟控制已移至设置页面
         
         # 开始按钮
-        start_btn = QPushButton("开始自动答题")
-        start_btn.setStyleSheet(UI_CONFIG["start_button_style"])
-        start_btn.clicked.connect(self.start_automation)
-        operations_layout.addWidget(start_btn)
+        self.start_btn = QPushButton("开始自动答题")
+        self.start_btn.setStyleSheet(UI_CONFIG["start_button_style"])
+        self.start_btn.clicked.connect(self.start_automation)
+        operations_layout.addWidget(self.start_btn)
         
         # 暂停按钮
         self.pause_btn = QPushButton("暂停")
@@ -287,9 +252,166 @@ class AutoAnswerApp(QMainWindow):
         
         question_db_layout.addWidget(view_group)
         
+        # 设置标签页
+        settings_tab = QWidget()
+        settings_layout = QVBoxLayout(settings_tab)
+        settings_layout.setContentsMargins(3, 3, 3, 3)
+        settings_layout.setSpacing(3)
+        
+        # 多线程设置组
+        multithread_group = QWidget()
+        multithread_layout = QVBoxLayout(multithread_group)
+        multithread_layout.setContentsMargins(3, 3, 3, 3)
+        multithread_layout.setSpacing(2)
+        
+        multithread_label = QLabel("多线程设置")
+        multithread_label.setStyleSheet(UI_CONFIG["label_style"])
+        multithread_layout.addWidget(multithread_label)
+        
+        # 多线程开关
+        self.multithread_checkbox = QCheckBox("启用多线程模式")
+        self.multithread_checkbox.setToolTip("启用后将同时打开多个浏览器窗口处理不同账号")
+        self.multithread_checkbox.stateChanged.connect(self.on_multithread_changed)
+        multithread_layout.addWidget(self.multithread_checkbox)
+        
+        # 线程数控制
+        thread_count_widget = QWidget()
+        thread_count_layout = QHBoxLayout(thread_count_widget)
+        thread_count_layout.setContentsMargins(0, 0, 0, 0)
+        thread_count_layout.setSpacing(5)
+        
+        thread_count_layout.addWidget(QLabel("线程数量:"))
+        self.thread_count_spinbox = QSpinBox()
+        self.thread_count_spinbox.setMinimum(1)
+        self.thread_count_spinbox.setMaximum(32)
+        
+        # 获取CPU优化建议的线程数
+        try:
+            from cpu_optimization import get_cpu_optimizer
+            cpu_optimizer = get_cpu_optimizer()
+            optimal_threads = cpu_optimizer.get_optimal_thread_count()
+            cpu_info = cpu_optimizer.get_cpu_info()
+            self.thread_count_spinbox.setValue(optimal_threads)
+            tooltip_text = f"设置同时运行的浏览器窗口数量（1-32）\n" \
+                          f"CPU信息: {cpu_info['physical_cores']}物理核心, {cpu_info['logical_cores']}逻辑核心\n" \
+                          f"建议线程数: {optimal_threads}"
+            self.thread_count_spinbox.setToolTip(tooltip_text)
+        except Exception:
+            self.thread_count_spinbox.setValue(2)
+            self.thread_count_spinbox.setToolTip("设置同时运行的浏览器窗口数量（1-32）")
+        
+        thread_count_layout.addWidget(self.thread_count_spinbox)
+        thread_count_layout.addStretch()
+        
+        multithread_layout.addWidget(thread_count_widget)
+        
+        # 多线程说明
+        try:
+            from cpu_optimization import get_cpu_optimizer
+            cpu_optimizer = get_cpu_optimizer()
+            cpu_info = cpu_optimizer.get_cpu_info()
+            help_text = f"注意：多线程模式会同时打开多个浏览器窗口\n" \
+                       f"CPU: {cpu_info['physical_cores']}物理核心/{cpu_info['logical_cores']}逻辑核心，已启用CPU优化"
+        except Exception:
+            help_text = "注意：多线程模式会同时打开多个浏览器窗口\n建议根据电脑性能调整线程数量"
+        
+        multithread_help = QLabel(help_text)
+        multithread_help.setStyleSheet("font-size: 11px; color: #666; margin-top: 5px; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
+        multithread_layout.addWidget(multithread_help)
+        
+        settings_layout.addWidget(multithread_group)
+        
+        # 操作延迟控制组
+        delay_group = QWidget()
+        delay_layout = QVBoxLayout(delay_group)
+        delay_layout.setContentsMargins(3, 3, 3, 3)
+        delay_layout.setSpacing(2)
+        
+        delay_label = QLabel("操作延迟控制")
+        delay_label.setStyleSheet(UI_CONFIG["label_style"])
+        delay_layout.addWidget(delay_label)
+        
+        delay_desc = QLabel("过低的延迟会导致程序卡顿")
+        delay_desc.setStyleSheet("font-size: 11px; color: #666; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
+        delay_layout.addWidget(delay_desc)
+        
+        # 延迟值显示标签
+        self.delay_value_label = QLabel(f"当前延迟: {OPERATION_DELAY['default']:.2f}秒")
+        self.delay_value_label.setStyleSheet("font-size: 11px; color: #666; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
+        delay_layout.addWidget(self.delay_value_label)
+        
+        # 延迟滑块
+        self.delay_slider = QSlider(Qt.Horizontal)
+        self.delay_slider.setMinimum(int(OPERATION_DELAY['min'] * 100))  # 转换为整数，精度0.01秒
+        self.delay_slider.setMaximum(int(OPERATION_DELAY['max'] * 100))
+        self.delay_slider.setValue(int(OPERATION_DELAY['default'] * 100))
+        self.delay_slider.setToolTip(f"调整操作间延迟时间 ({OPERATION_DELAY['min']}s - {OPERATION_DELAY['max']}s)")
+        self.delay_slider.valueChanged.connect(self.on_delay_changed)
+        delay_layout.addWidget(self.delay_slider)
+        
+        # 延迟范围标签
+        range_widget = QWidget()
+        range_layout = QHBoxLayout(range_widget)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setSpacing(0)
+        
+        min_label = QLabel(f"{OPERATION_DELAY['min']}s")
+        min_label.setStyleSheet("font-size: 10px; color: #888; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
+        max_label = QLabel(f"{OPERATION_DELAY['max']}s")
+        max_label.setStyleSheet("font-size: 10px; color: #888; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;")
+        
+        range_layout.addWidget(min_label)
+        range_layout.addStretch()
+        range_layout.addWidget(max_label)
+        
+        delay_layout.addWidget(range_widget)
+        settings_layout.addWidget(delay_group)
+        
+        # 日志管理组
+        log_management_group = QWidget()
+        log_management_layout = QVBoxLayout(log_management_group)
+        log_management_layout.setContentsMargins(3, 3, 3, 3)
+        log_management_layout.setSpacing(2)
+        
+        log_management_label = QLabel("日志管理")
+        log_management_label.setStyleSheet(UI_CONFIG["label_style"])
+        log_management_layout.addWidget(log_management_label)
+        
+        # 日志控制按钮
+        log_controls = QWidget()
+        log_controls_layout = QHBoxLayout(log_controls)
+        log_controls_layout.setContentsMargins(0, 0, 0, 0)
+        log_controls_layout.setSpacing(3)
+        
+        clear_log_btn = QPushButton("清空日志")
+        clear_log_btn.clicked.connect(self.clear_log)
+        log_controls_layout.addWidget(clear_log_btn)
+        
+        clean_log_files_btn = QPushButton("清理日志文件")
+        clean_log_files_btn.clicked.connect(self.clean_log_files)
+        log_controls_layout.addWidget(clean_log_files_btn)
+        
+        log_management_layout.addWidget(log_controls)
+        settings_layout.addWidget(log_management_group)
+        
+        # 系统监控组
+        system_monitor_group = QWidget()
+        system_monitor_layout = QVBoxLayout(system_monitor_group)
+        system_monitor_layout.setContentsMargins(3, 3, 3, 3)
+        system_monitor_layout.setSpacing(2)
+        
+        # 添加系统监控组件
+        self.resource_widget = ResourceWidget()
+        system_monitor_layout.addWidget(self.resource_widget)
+        settings_layout.addWidget(system_monitor_group)
+        
+        # 添加弹性空间
+        settings_layout.addStretch()
+        
         # 添加标签页
         tab_widget.addTab(auto_answer_tab, "自动答题")
         tab_widget.addTab(question_db_tab, "题库管理")
+        tab_widget.addTab(settings_tab, "设置")
         control_layout.addWidget(tab_widget)
         main_layout.addWidget(control_panel)
         
@@ -308,24 +430,7 @@ class AutoAnswerApp(QMainWindow):
         self.log_text.setReadOnly(True)
         log_layout.addWidget(self.log_text)
         
-        # 日志控制按钮
-        log_controls = QWidget()
-        log_controls_layout = QHBoxLayout(log_controls)
-        log_controls_layout.setContentsMargins(0, 0, 0, 0)
-        log_controls_layout.setSpacing(3)
-        
-        clear_log_btn = QPushButton("清空日志")
-        clear_log_btn.clicked.connect(self.clear_log)
-        clear_log_btn.setMaximumWidth(80)
-        log_controls_layout.addWidget(clear_log_btn)
-        
-        clean_log_files_btn = QPushButton("清理日志文件")
-        clean_log_files_btn.clicked.connect(self.clean_log_files)
-        clean_log_files_btn.setMaximumWidth(100)
-        log_controls_layout.addWidget(clean_log_files_btn)
-        
-        log_controls_layout.addStretch()
-        log_layout.addWidget(log_controls)
+        # 日志控制按钮已移至设置页面
         
         # 添加日志区域到主布局
         main_layout.addWidget(log_group)
@@ -592,91 +697,9 @@ class AutoAnswerApp(QMainWindow):
             self.accounts.pop(index)
             self.log(f"已删除账号: {account}")
     
-    def start_automation(self):
-        if not self.accounts:
-            self.update_status_bar("请先添加账号！", is_error=True)
-            return
-            
-        # 检查是否已有自动化进程在运行
-        if self.browser_automation and self.browser_automation.isRunning():
-            self.update_status_bar("自动化进程已在运行中！", is_error=True)
-            return
-            
-        # 根据用户选择更新浏览器显示配置
-        import config
-        config.SHOW_BROWSER_WINDOW = self.show_browser_checkbox.isChecked()
-        
-        if config.SHOW_BROWSER_WINDOW:
-            self.log("已启用浏览器窗口显示，您可以观察自动化过程")
-        else:
-            self.log("浏览器将在后台运行（无头模式）")
-            
-        # 创建自动化线程
-        self.browser_automation = BrowserAutomation(self.accounts, self.question_db)
-        self.browser_automation.log_signal.connect(self.log)
-        self.browser_automation.status_signal.connect(self.update_account_status)
-        self.browser_automation.progress_signal.connect(self.update_progress)
-        self.browser_automation.finished.connect(self.on_automation_finished)
-        
-        # 设置当前的延迟时间
-        current_delay = self.get_current_delay()
-        self.browser_automation.set_operation_delay(current_delay)
-        
-        self.browser_automation.start()
-        
-        # 更新按钮状态
-        self.pause_btn.setEnabled(True)
-        self.stop_btn.setEnabled(True)
-        self.pause_btn.setText("暂停")
-        
-        self.log("开始自动答题...")
-        self.update_status_bar(f"自动答题已启动 - 共{len(self.accounts)}个账号", progress=0)
-        if config.SHOW_BROWSER_WINDOW:
-            self.log("请关注外部Chrome浏览器窗口查看自动化进度")
-        else:
-            self.log("自动化进程已在后台运行，请查看日志了解进度")
+    # start_automation方法已移至文件末尾，支持多线程模式
     
-    def pause_automation(self):
-        if not self.browser_automation or not self.browser_automation.isRunning():
-            self.update_status_bar("没有正在运行的自动化进程！", is_error=True)
-            return
-            
-        if self.browser_automation.paused:
-            # 恢复自动化
-            self.browser_automation.resume()
-            self.pause_btn.setText("暂停")
-            self.log("已恢复自动答题")
-            self.update_status_bar("自动答题已恢复")
-        else:
-            # 暂停自动化
-            self.browser_automation.pause()
-            self.pause_btn.setText("恢复")
-            self.log("已暂停自动答题")
-            self.update_status_bar("自动答题已暂停")
-    
-    def stop_automation(self):
-        if not self.browser_automation or not self.browser_automation.isRunning():
-            self.update_status_bar("没有正在运行的自动化进程！", is_error=True)
-            return
-            
-        # 确认停止
-        reply = QMessageBox.question(self, "确认停止", 
-                                   "确定要停止自动答题吗？", 
-                                   QMessageBox.Yes | QMessageBox.No, 
-                                   QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.browser_automation.stop()
-            self.log("正在停止自动答题...")
-            self.update_status_bar("正在停止自动答题...")
-    
-    def on_automation_finished(self):
-        """自动化完成后的回调函数"""
-        # 重置按钮状态
-        self.pause_btn.setEnabled(False)
-        self.stop_btn.setEnabled(False)
-        self.pause_btn.setText("暂停")
-        self.log("自动化进程已结束")
-        self.update_status_bar("自动化进程已结束", progress=100)
+    # pause_automation, stop_automation, on_automation_finished 方法已移至文件末尾，支持多线程模式
     
     def update_account_status(self, account_index, status):
         if 0 <= account_index < self.accounts_table.rowCount():
@@ -1195,6 +1218,264 @@ class AutoAnswerApp(QMainWindow):
                 message += f"总共节省空间: {total_saved:.1f}MB"
             
             self.log(message)
-            QMessageBox.information(self, "清理完成", message)
-        elif not silent:
-            self.log("无需清理日志文件（文件大小正常）")
+    
+    def setup_multithread_signals(self):
+        """设置多线程信号连接"""
+        self.multi_thread_manager.log_signal.connect(self.log)
+        self.multi_thread_manager.status_signal.connect(self.update_account_status)
+        self.multi_thread_manager.progress_signal.connect(self.update_progress)
+        self.multi_thread_manager.all_finished_signal.connect(self.on_automation_finished)
+    
+    def on_multithread_changed(self, state):
+        """多线程模式切换"""
+        self.is_multithread_mode = state == Qt.Checked
+        self.thread_count_spinbox.setEnabled(self.is_multithread_mode)
+        
+        if self.is_multithread_mode:
+            self.log("已启用多线程模式")
+        else:
+            self.log("已禁用多线程模式")
+    
+    def start_automation(self):
+        """开始自动化（支持单线程和多线程模式）"""
+        if not self.accounts:
+            self.log("请先添加账号")
+            return
+        
+        if self.is_multithread_mode:
+            self.start_multithread_automation()
+        else:
+            self.start_singlethread_automation()
+    
+    def start_singlethread_automation(self):
+        """开始单线程自动化（原有逻辑）"""
+        if self.browser_automation and self.browser_automation.isRunning():
+            self.log("自动化程序正在运行中...")
+            return
+        
+        # 根据用户选择更新浏览器显示配置
+        import config
+        config.SHOW_BROWSER_WINDOW = self.show_browser_checkbox.isChecked()
+        
+        if config.SHOW_BROWSER_WINDOW:
+            self.log("已启用浏览器窗口显示，您可以观察自动化过程")
+        else:
+            self.log("浏览器将在后台运行（无头模式）")
+        
+        self.browser_automation = BrowserAutomation(self.accounts, self.question_db)
+        self.browser_automation.set_operation_delay(self.delay_multiplier * OPERATION_DELAY['default'])
+        
+        # 连接信号
+        self.browser_automation.log_signal.connect(self.log)
+        self.browser_automation.status_signal.connect(self.update_account_status)
+        self.browser_automation.progress_signal.connect(self.update_progress)
+        self.browser_automation.finished.connect(self.on_automation_finished)
+        
+        # 启动自动化
+        self.browser_automation.start()
+        
+        # 更新按钮状态
+        self.start_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+        self.pause_btn.setText("暂停")
+        
+        self.log("开始单线程自动答题...")
+        self.update_status_bar(f"自动答题已启动 - 共{len(self.accounts)}个账号", progress=0)
+        if config.SHOW_BROWSER_WINDOW:
+            self.log("请关注外部Chrome浏览器窗口查看自动化进度")
+        else:
+            self.log("自动化进程已在后台运行，请查看日志了解进度")
+    
+    def start_multithread_automation(self):
+        """开始多线程自动化"""
+        if self.multi_thread_manager.running:
+            self.log("多线程自动化程序正在运行中...")
+            return
+        
+        # 设置多线程参数
+        thread_count = self.thread_count_spinbox.value()
+        self.multi_thread_manager.set_thread_count(thread_count)
+        self.multi_thread_manager.set_delay_multiplier(self.delay_multiplier)
+        
+        # 启动多线程自动化
+        self.multi_thread_manager.start_automation(self.accounts)
+        
+        # 更新按钮状态
+        self.start_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+        self.pause_btn.setText("暂停")
+        
+        self.log(f"开始多线程自动答题，使用 {thread_count} 个线程...")
+    
+    def pause_automation(self):
+        """暂停/恢复自动化"""
+        if self.is_multithread_mode:
+            if self.multi_thread_manager.paused:
+                self.multi_thread_manager.resume_automation()
+                self.pause_btn.setText("暂停")
+                self.log("已恢复多线程自动化")
+                self.update_status_bar("多线程自动化已恢复")
+            else:
+                self.multi_thread_manager.pause_automation()
+                self.pause_btn.setText("恢复")
+                self.log("已暂停多线程自动化")
+                self.update_status_bar("多线程自动化已暂停")
+        else:
+            if self.browser_automation and self.browser_automation.isRunning():
+                if self.browser_automation.paused:
+                    self.browser_automation.paused = False
+                    self.pause_btn.setText("暂停")
+                    self.log("已恢复自动答题")
+                    self.update_status_bar("自动答题已恢复")
+                else:
+                    self.browser_automation.paused = True
+                    self.pause_btn.setText("恢复")
+                    self.log("已暂停自动答题")
+                    self.update_status_bar("自动答题已暂停")
+            else:
+                self.update_status_bar("没有正在运行的自动化进程！", is_error=True)
+    
+    def stop_automation(self):
+        """停止自动化"""
+        # 确认停止
+        reply = QMessageBox.question(self, "确认停止", 
+                                   "确定要停止自动答题吗？", 
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        
+        # 立即禁用按钮，防止重复点击
+        self.stop_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        
+        self.log("正在停止自动答题...")
+        self.update_status_bar("正在停止自动答题...")
+        
+        # 使用清理管理器异步停止
+        try:
+            from cleanup_manager import get_cleanup_manager
+            cleanup_manager = get_cleanup_manager()
+            cleanup_manager.log_signal.connect(self.log)
+            cleanup_manager.cleanup_finished.connect(self.on_stop_cleanup_finished)
+            
+            if self.is_multithread_mode:
+                # 收集需要清理的资源
+                workers = self.multi_thread_manager.workers if hasattr(self.multi_thread_manager, 'workers') else []
+                drivers = []
+                for worker in workers:
+                    if hasattr(worker, 'automation') and worker.automation and hasattr(worker.automation, 'driver'):
+                        drivers.append(worker.automation.driver)
+                
+                # 设置停止标志
+                self.multi_thread_manager.running = False
+                
+                # 异步清理
+                cleanup_manager.immediate_cleanup(drivers=drivers, workers=workers)
+            else:
+                drivers = []
+                if self.browser_automation and hasattr(self.browser_automation, 'driver'):
+                    drivers.append(self.browser_automation.driver)
+                
+                if self.browser_automation and self.browser_automation.isRunning():
+                    self.browser_automation.running = False
+                
+                cleanup_manager.immediate_cleanup(drivers=drivers)
+        except Exception as e:
+            self.log(f"停止过程中发生错误: {str(e)}")
+            self.on_stop_cleanup_finished()  # 确保按钮状态恢复
+    
+    def on_stop_cleanup_finished(self):
+        """停止清理完成后的回调"""
+        # 清理多线程管理器
+        if self.is_multithread_mode and hasattr(self, 'multi_thread_manager'):
+            self.multi_thread_manager.workers = []
+        
+        # 重置按钮状态
+        self.start_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.pause_btn.setText("暂停")
+        
+        self.log("自动答题已停止")
+        self.update_status_bar("自动答题已停止")
+    
+    def on_automation_finished(self):
+        """自动化完成回调"""
+        # 更新按钮状态
+        self.start_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.pause_btn.setText("暂停")
+        
+        if self.is_multithread_mode:
+            self.log("多线程自动化已完成")
+            self.update_status_bar("多线程自动化已完成", progress=100)
+        else:
+            self.log("单线程自动化已完成")
+            self.update_status_bar("单线程自动化已完成", progress=100)
+        
+        # 播放完成提示音（如果系统支持）
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except:
+            pass
+        
+        # 显示完成通知
+        QMessageBox.information(self, "自动化完成", "所有账号的自动答题已完成！")
+    
+    def closeEvent(self, event):
+        """程序关闭事件处理"""
+        # 如果有正在运行的任务，询问用户是否确认关闭
+        if ((hasattr(self, 'multi_thread_manager') and self.multi_thread_manager.running) or 
+            (hasattr(self, 'browser_automation') and self.browser_automation and self.browser_automation.isRunning())):
+            
+            reply = QMessageBox.question(self, "确认关闭", 
+                                       "程序正在运行中，确定要关闭吗？\n关闭可能需要几秒钟来清理资源。", 
+                                       QMessageBox.Yes | QMessageBox.No, 
+                                       QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+        
+        # 停止系统监控
+        if hasattr(self, 'resource_widget'):
+            self.resource_widget.stop_monitoring()
+        
+        # 使用异步清理管理器
+        try:
+            from cleanup_manager import get_cleanup_manager
+            cleanup_manager = get_cleanup_manager()
+            
+            # 收集需要清理的资源
+            drivers = []
+            workers = []
+            
+            if hasattr(self, 'multi_thread_manager') and self.multi_thread_manager.workers:
+                workers = self.multi_thread_manager.workers
+                for worker in workers:
+                    if hasattr(worker, 'automation') and worker.automation and hasattr(worker.automation, 'driver'):
+                        drivers.append(worker.automation.driver)
+                self.multi_thread_manager.running = False
+            
+            if hasattr(self, 'browser_automation') and self.browser_automation:
+                if hasattr(self.browser_automation, 'driver'):
+                    drivers.append(self.browser_automation.driver)
+                self.browser_automation.running = False
+            
+            # 如果有资源需要清理，进行快速清理
+            if drivers or workers:
+                cleanup_manager.cleanup_chrome_processes_fast()
+                
+                # 快速清理线程
+                if workers:
+                    cleanup_manager.cleanup_threads_gracefully(workers, 2)
+        
+        except Exception as e:
+            print(f"关闭清理时发生错误: {str(e)}")
+        
+        event.accept()
