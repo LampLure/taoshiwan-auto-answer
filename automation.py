@@ -35,6 +35,8 @@ class BrowserAutomation(QThread):
         self._element_cache = {}  # 元素缓存
         self._wait_cache = {}     # WebDriverWait对象缓存
         self.skipped_homeworks = set()  # 记录已跳过的作业，避免重复处理
+        self.browser_process_id = None  # 记录当前浏览器进程ID
+        self.chrome_processes = []  # 记录当前线程启动的Chrome进程
     
     def set_operation_delay(self, delay_seconds):
         """设置操作延迟时间"""
@@ -161,34 +163,72 @@ class BrowserAutomation(QThread):
         self._wait_cache.clear()
     
     def kill_chrome_processes(self):
-        """强制关闭所有Chrome进程"""
+        """只关闭当前线程的Chrome进程"""
         try:
-            # 如果psutil可用，使用它来关闭进程
+            # 如果psutil可用，使用它来关闭特定进程
+            if psutil and self.chrome_processes:
+                for pid in self.chrome_processes[:]:
+                    try:
+                        proc = psutil.Process(pid)
+                        if proc.is_running() and 'chrome' in proc.name().lower():
+                            proc.kill()
+                            self.log_signal.emit(f"已关闭当前线程的Chrome进程: {pid}")
+                            self.chrome_processes.remove(pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                        # 进程已不存在或无权限访问，从列表中移除
+                        if pid in self.chrome_processes:
+                            self.chrome_processes.remove(pid)
+                        pass
+            
+            # 如果没有记录到进程ID，尝试通过driver的service关闭
+            if hasattr(self, 'driver') and self.driver and hasattr(self.driver, 'service'):
+                try:
+                    service = self.driver.service
+                    if hasattr(service, 'process') and service.process:
+                        service.process.terminate()
+                        self.log_signal.emit("已通过service关闭chromedriver进程")
+                except Exception as e:
+                    self.log_signal.emit(f"通过service关闭进程失败: {str(e)}")
+                    
+        except Exception as e:
+            self.log_signal.emit(f"关闭Chrome进程时出错: {str(e)}")    
+    
+    def track_chrome_processes(self):
+        """跟踪当前启动的Chrome进程"""
+        try:
             if psutil:
-                # 查找并关闭Chrome相关进程
+                # 记录当前所有Chrome进程，用于后续识别新启动的进程
+                existing_pids = set()
                 for proc in psutil.process_iter(['pid', 'name']):
                     try:
                         if 'chrome' in proc.info['name'].lower():
-                            proc.kill()
-                            self.log_signal.emit(f"已关闭Chrome进程: {proc.info['pid']}")
+                            existing_pids.add(proc.info['pid'])
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
-            
-            # 使用taskkill命令作为主要或备用方案
-            try:
-                result1 = subprocess.run(['taskkill', '/f', '/im', 'chrome.exe'], 
-                                       capture_output=True, check=False)
-                result2 = subprocess.run(['taskkill', '/f', '/im', 'chromedriver.exe'], 
-                                       capture_output=True, check=False)
-                
-                if result1.returncode == 0 or result2.returncode == 0:
-                    self.log_signal.emit("已使用taskkill命令关闭Chrome进程")
-                    
-            except Exception as e:
-                self.log_signal.emit(f"taskkill命令执行失败: {str(e)}")
-                
+                return existing_pids
         except Exception as e:
-            self.log_signal.emit(f"关闭Chrome进程时出错: {str(e)}")
+            self.log_signal.emit(f"跟踪Chrome进程时出错: {str(e)}")
+        return set()
+    
+    def update_chrome_processes(self, existing_pids):
+        """更新Chrome进程列表，记录新启动的进程"""
+        try:
+            if psutil:
+                current_pids = set()
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        if 'chrome' in proc.info['name'].lower():
+                            current_pids.add(proc.info['pid'])
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                # 找出新启动的进程
+                new_pids = current_pids - existing_pids
+                self.chrome_processes.extend(new_pids)
+                if new_pids:
+                    self.log_signal.emit(f"检测到新启动的Chrome进程: {list(new_pids)}")
+        except Exception as e:
+            self.log_signal.emit(f"更新Chrome进程列表时出错: {str(e)}")
     
     def cleanup_browser(self):
         """清理浏览器资源，确保完全关闭"""
@@ -218,6 +258,9 @@ class BrowserAutomation(QThread):
         self.paused = False
         
         # 初始化WebDriver
+        # 跟踪启动前的Chrome进程
+        existing_pids = self.track_chrome_processes()
+        
         options = webdriver.ChromeOptions()
         for option in BROWSER_OPTIONS:
             options.add_argument(option)
@@ -238,6 +281,9 @@ class BrowserAutomation(QThread):
             self.log_signal.emit("浏览器窗口将显示，便于调试")
         
         self.driver = webdriver.Chrome(options=options)
+        
+        # 更新Chrome进程列表，记录新启动的进程
+        self.update_chrome_processes(existing_pids)
         
         try:
             total_accounts = len(self.accounts)
@@ -315,6 +361,9 @@ class BrowserAutomation(QThread):
                             self.wait_with_delay(3)  # 统一延迟控制
                             
                             # 重新初始化浏览器
+                            # 跟踪重新启动前的Chrome进程
+                            existing_pids = self.track_chrome_processes()
+                            
                             options = webdriver.ChromeOptions()
                             for option in BROWSER_OPTIONS:
                                 options.add_argument(option)
@@ -341,6 +390,9 @@ class BrowserAutomation(QThread):
                             service.start()
                             
                             self.driver = webdriver.Chrome(options=options, service=service)
+                            
+                            # 更新Chrome进程列表，记录新启动的进程
+                            self.update_chrome_processes(existing_pids)
                             self.log_signal.emit("浏览器重新初始化成功，将重试当前账号")
                             
                             # 重试当前账号，不增加索引
@@ -1286,6 +1338,9 @@ class QuestionBankImporter(QObject):
     def _init_browser(self):
         """初始化浏览器"""
         try:
+            # 跟踪启动前的Chrome进程
+            existing_pids = self.track_chrome_processes()
+            
             # 使用与主程序相同的浏览器配置
             options = webdriver.ChromeOptions()
             for option in BROWSER_OPTIONS:
@@ -1299,6 +1354,10 @@ class QuestionBankImporter(QObject):
                 self.log_signal.emit("🌐 浏览器窗口将显示，便于调试")
             
             self.driver = webdriver.Chrome(options=options)
+            
+            # 更新Chrome进程列表，记录新启动的进程
+            self.update_chrome_processes(existing_pids)
+            
             self.driver.set_page_load_timeout(30)
             self.log_signal.emit("🌐 浏览器初始化成功")
             return True

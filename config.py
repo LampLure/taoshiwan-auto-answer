@@ -67,16 +67,14 @@ USE_EXTERNAL_BROWSER_AS_DISPLAY = True  # 使用外部浏览器作为主要显�
 
 # 基础浏览器选项
 BASE_BROWSER_OPTIONS = [
-    # 禁用GPU加速，避免一些渲染问题
-    "--disable-gpu",
     # 禁用沙盒模式，避免一些权限问题
     "--no-sandbox",
-    # 禁用开发者工具
+    # 禁用开发者工具共享内存
     "--disable-dev-shm-usage",
-    # 设置窗口大小，与QWebEngineView匹配
+    # 设置窗口大小
     "--window-size=1200,800",
-    # 禁用扩展
-    "--disable-extensions",
+    # 强制显示窗口（移除可能隐藏窗口的选项）
+    "--start-maximized",
     # 禁用默认浏览器检查
     "--no-default-browser-check",
     # 禁用首次运行界面
@@ -85,40 +83,30 @@ BASE_BROWSER_OPTIONS = [
     "--disable-popup-blocking",
     # 启用自动化
     "--enable-automation",
-    # 日志级别
-    "--log-level=3"
+    # 降低日志级别
+    "--log-level=1"
 ]
 
-# CPU优化选项
+# CPU优化选项（移除可能影响窗口显示的选项）
 CPU_OPTIMIZED_OPTIONS = [
-    # CPU和内存优化
+    # 基础内存优化
     "--max_old_space_size=4096",
     "--memory-pressure-off",
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
     
-    # 进程管理优化
-    "--process-per-site",
+    # 进程管理优化（保留安全的选项）
     "--disable-features=TranslateUI",
     "--disable-ipc-flooding-protection",
     
     # 网络优化
-    "--aggressive-cache-discard",
     "--disable-background-networking",
     "--disable-sync",
     "--disable-default-apps",
-    "--disable-component-extensions-with-background-pages",
     
-    # 渲染优化
-    "--disable-gpu-sandbox",
+    # 安全的渲染优化
     "--disable-software-rasterizer",
-    "--enable-gpu-rasterization",
     
     # 进程管理
-    "--disable-web-security",
-    "--renderer-process-limit=8",
-    "--max-gum-fps=60"
+    "--renderer-process-limit=4"
 ]
 
 # 合并所有选项

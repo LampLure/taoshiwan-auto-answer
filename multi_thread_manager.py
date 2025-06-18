@@ -21,6 +21,61 @@ class ThreadWorker(QThread):
         self.running = False
         self.paused = False
         self.automation = None
+        self.global_start_index = 0  # 全局起始索引
+        
+    def filtered_log_emit(self, msg):
+        """过滤日志消息，只输出账号状态相关的重要信息"""
+        # 定义需要保留的重要日志关键词
+        important_keywords = [
+            # 账号状态相关
+            "开始处理账号", "登录成功", "登录失败", "已完成", "处理完成",
+            # 作业状态相关 
+            "标注并跳过", "所有可见的作业都已被标注为跳过", "所有作业已处理完成",
+            "未找到任何补作业按钮", "个待完成的作业", "作业处理完成",
+            "在作业详情页面未找到做作业按钮", "该作业可能已完成或无法进行",
+            "做作业按钮不存在", "跳过作业记录", "该作业已被标记为跳过",
+            # 错误和异常
+            "浏览器会话.*失效", "重新初始化", "清理完成", "初始化失败",
+            "导航.*失败", "登出", "账号.*继续处理下一个",
+            # 重要状态信息
+            "线程.*开始处理", "线程.*处理完成", "线程.*发生错误"
+        ]
+        
+        # 定义需要过滤掉的详细处理日志关键词
+        filter_keywords = [
+            "处理第", "道题", "题目文本", "找到题目答案", "未找到题目答案，随机选择",
+            "未找到题目答案，跳过", "原始题目文本", "清理后题目文本", "已成功输入",
+            "答案输入验证", "调用setSubject函数", "点击选项", "选择选项",
+            "等待页面跳转", "页面跳转完成", "当前URL", "onclick属性",
+            "补作业按钮onclick属性", "选择第", "个作业进行处理"
+        ]
+        
+        # 检查是否包含需要过滤的关键词
+        for keyword in filter_keywords:
+            if keyword in msg:
+                return  # 过滤掉这些详细处理日志
+        
+        # 检查是否包含重要关键词
+        should_keep = False
+        import re
+        
+        for keyword in important_keywords:
+            # 使用正则表达式匹配，支持模糊匹配
+            if re.search(keyword, msg):
+                should_keep = True
+                break
+        
+        # 特殊处理：保留包含数字的作业统计信息
+        if re.search(r'找到\s*\d+\s*个.*作业', msg):
+            should_keep = True
+        
+        # 特殊处理：保留跳过相关的重要信息
+        if any(word in msg for word in ["跳过第", "个作业，该作业已被标注为无法完成"]):
+            should_keep = True
+            
+        # 保留重要的日志消息
+        if should_keep:
+            self.log_signal.emit(f"[线程{self.thread_id}] {msg}", self.thread_id)
         
     def run(self):
         """运行线程"""
@@ -32,9 +87,9 @@ class ThreadWorker(QThread):
             self.automation = BrowserAutomation(self.accounts, self.question_db)
             self.automation.set_operation_delay(self.automation.operation_delay * self.delay_multiplier)
             
-            # 连接信号
-            self.automation.log_signal.connect(lambda msg: self.log_signal.emit(f"[线程{self.thread_id}] {msg}", self.thread_id))
-            self.automation.status_signal.connect(lambda account_index, status: self.status_signal.emit(account_index, status, self.thread_id))
+            # 连接信号（添加日志过滤）
+            self.automation.log_signal.connect(lambda msg: self.filtered_log_emit(msg))
+            self.automation.status_signal.connect(lambda account_index, status: self.status_signal.emit(self.global_start_index + account_index, status, self.thread_id))
             self.automation.progress_signal.connect(lambda progress, msg: self.progress_signal.emit(progress, msg, self.thread_id))
             
             # 启动自动化
@@ -152,8 +207,10 @@ class MultiThreadManager(QObject):
         self.log_signal.emit(f"启动多线程模式，使用 {len(distributed_accounts)} 个线程处理 {len(accounts)} 个账号")
         
         # 创建并启动工作线程
+        global_start_index = 0
         for i, thread_accounts in enumerate(distributed_accounts):
             worker = ThreadWorker(i + 1, thread_accounts, self.question_db, self.delay_multiplier)
+            worker.global_start_index = global_start_index  # 设置全局起始索引
             
             # 连接信号
             worker.log_signal.connect(self.on_worker_log)
@@ -163,6 +220,9 @@ class MultiThreadManager(QObject):
             
             self.workers.append(worker)
             worker.start()
+            
+            # 更新全局起始索引
+            global_start_index += len(thread_accounts)
             
             # 错开启动时间，避免同时访问网站
             time.sleep(2)

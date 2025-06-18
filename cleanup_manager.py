@@ -45,17 +45,29 @@ class CleanupManager(QObject):
         self.cleanup_timer.timeout.connect(self.force_cleanup_timeout)
         self.max_cleanup_time = 5000  # 最大清理时间5秒
         
-    def cleanup_chrome_processes_fast(self):
+    def cleanup_chrome_processes_fast(self, specific_pids=None):
         """快速清理Chrome进程"""
         try:
-            # 使用taskkill快速关闭，不等待确认
-            subprocess.Popen(['taskkill', '/f', '/im', 'chrome.exe'], 
-                           stdout=subprocess.DEVNULL, 
-                           stderr=subprocess.DEVNULL)
-            subprocess.Popen(['taskkill', '/f', '/im', 'chromedriver.exe'], 
-                           stdout=subprocess.DEVNULL, 
-                           stderr=subprocess.DEVNULL)
-            self.log_signal.emit("Chrome进程清理命令已发送")
+            if specific_pids:
+                # 只清理指定的进程ID
+                for pid in specific_pids:
+                    try:
+                        subprocess.Popen(['taskkill', '/f', '/pid', str(pid)], 
+                                       stdout=subprocess.DEVNULL, 
+                                       stderr=subprocess.DEVNULL)
+                        self.log_signal.emit(f"已发送清理命令给进程: {pid}")
+                    except Exception as e:
+                        self.log_signal.emit(f"清理进程 {pid} 失败: {str(e)}")
+            else:
+                # 只在紧急情况下才全局清理
+                self.log_signal.emit("⚠️ 执行全局Chrome进程清理（紧急模式）")
+                subprocess.Popen(['taskkill', '/f', '/im', 'chrome.exe'], 
+                               stdout=subprocess.DEVNULL, 
+                               stderr=subprocess.DEVNULL)
+                subprocess.Popen(['taskkill', '/f', '/im', 'chromedriver.exe'], 
+                               stdout=subprocess.DEVNULL, 
+                               stderr=subprocess.DEVNULL)
+                self.log_signal.emit("全局Chrome进程清理命令已发送")
         except Exception as e:
             self.log_signal.emit(f"Chrome进程清理失败: {str(e)}")
     
@@ -123,7 +135,8 @@ class CleanupManager(QObject):
             self.cleanup_worker.stop()
             self.cleanup_worker.terminate()
         
-        # 强制清理Chrome进程
+        # 超时情况下进行全局清理（紧急模式）
+        self.log_signal.emit("⚠️ 清理超时，启用紧急全局清理模式")
         self.cleanup_chrome_processes_fast()
         
         self.cleanup_finished.emit()
@@ -132,6 +145,14 @@ class CleanupManager(QObject):
     def immediate_cleanup(self, drivers=None, workers=None):
         """立即清理（用于紧急情况）"""
         cleanup_tasks = []
+        chrome_pids = set()
+        
+        # 收集需要清理的Chrome进程ID
+        if workers:
+            for worker in workers:
+                if hasattr(worker, 'automation') and worker.automation:
+                    if hasattr(worker.automation, 'chrome_processes'):
+                        chrome_pids.update(worker.automation.chrome_processes)
         
         if drivers:
             for i, driver in enumerate(drivers):
@@ -141,7 +162,13 @@ class CleanupManager(QObject):
         if workers:
             cleanup_tasks.append(("工作线程", lambda: self.cleanup_threads_gracefully(workers, 2)))
         
-        cleanup_tasks.append(("Chrome进程", self.cleanup_chrome_processes_fast))
+        # 只清理特定的Chrome进程，而不是全局清理
+        if chrome_pids:
+            cleanup_tasks.append(("特定Chrome进程", lambda: self.cleanup_chrome_processes_fast(list(chrome_pids))))
+            self.log_signal.emit(f"将清理特定的Chrome进程: {list(chrome_pids)}")
+        else:
+            # 只有在没有找到特定进程时才进行全局清理
+            cleanup_tasks.append(("Chrome进程", lambda: self.cleanup_chrome_processes_fast()))
         
         if cleanup_tasks:
             self.start_async_cleanup(cleanup_tasks)
