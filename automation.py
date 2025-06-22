@@ -280,10 +280,19 @@ class BrowserAutomation(QThread):
         else:
             self.log_signal.emit("浏览器窗口将显示，便于调试")
         
-        self.driver = webdriver.Chrome(options=options)
-        
-        # 更新Chrome进程列表，记录新启动的进程
-        self.update_chrome_processes(existing_pids)
+        try:
+            self.log_signal.emit("正在初始化WebDriver...")
+            self.driver = webdriver.Chrome(options=options)
+            if self.driver:
+                self.log_signal.emit(f"WebDriver初始化成功, 浏览器窗口句柄: {self.driver.current_window_handle}")
+                # 更新Chrome进程列表，记录新启动的进程
+                self.update_chrome_processes(existing_pids)
+            else:
+                self.log_signal.emit("❌ WebDriver初始化失败，实例为空")
+                self.running = False # 停止运行
+        except Exception as e:
+            self.log_signal.emit(f"❌ WebDriver初始化时发生严重错误: {str(e)}")
+            self.running = False # 停止运行
         
         try:
             total_accounts = len(self.accounts)

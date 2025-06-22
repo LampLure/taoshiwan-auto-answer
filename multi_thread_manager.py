@@ -93,8 +93,7 @@ class ThreadWorker(QThread):
             self.automation.progress_signal.connect(lambda progress, msg: self.progress_signal.emit(progress, msg, self.thread_id))
             
             # 启动自动化
-            self.automation.start()
-            self.automation.wait()  # 等待完成
+            self.automation.run()
             
             self.log_signal.emit(f"线程 {self.thread_id} 处理完成", self.thread_id)
             
